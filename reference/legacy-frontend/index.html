@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ElevenLabs Transcription Workbench</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}?v={{ asset_versions.styles_css }}">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero card">
+        <div>
+          <p class="eyebrow">Local transcription studio</p>
+          <h1>ElevenLabs Transcription Workbench</h1>
+          <p class="hero-copy">
+            Run batch transcriptions from a clean local UI, keep your API key server-side,
+            and reopen prior jobs whenever you need them.
+          </p>
+        </div>
+        <div class="hero-stats">
+          <div class="stat">
+            <span class="stat-label">Source modes</span>
+            <strong>Upload + HTTPS</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Saved locally</span>
+            <strong>History + exports</strong>
+          </div>
+        </div>
+      </header>
+
+      <div class="layout">
+        <aside class="history-panel card">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">History</p>
+              <h2>Recent Jobs</h2>
+            </div>
+            <div class="button-row">
+              <button id="showHiddenButton" class="ghost-button" type="button">Show hidden</button>
+              <button id="auditRemoteButton" class="ghost-button" type="button">Audit ElevenLabs</button>
+              <button id="refreshHistoryButton" class="ghost-button" type="button">Refresh</button>
+            </div>
+          </div>
+          <ul id="historyList" class="history-list">
+            <li class="empty-note">No jobs yet.</li>
+          </ul>
+        </aside>
+
+        <main class="workspace">
+          <section class="card key-card">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Credentials</p>
+                <h2>ElevenLabs API Key</h2>
+              </div>
+              <p id="savedKeyStatus" class="key-status">No saved key</p>
+            </div>
+            <form id="apiKeyForm" class="key-form">
+              <label class="field">
+                <span>API key</span>
+                <input id="apiKeyInput" name="api_key" type="password" placeholder="Paste your ElevenLabs key">
+              </label>
+              <div class="button-row">
+                <button class="primary-button" type="submit">Save key</button>
+                <button id="removeKeyButton" class="ghost-button" type="button">Remove key</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="card usage-card">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Usage</p>
+                <h2>Credits & Activity</h2>
+              </div>
+              <button id="refreshUsageButton" class="ghost-button" type="button">Refresh usage</button>
+            </div>
+
+            <p id="usageStatus" class="status-message">Save an API key to load usage.</p>
+
+            <div id="usagePanel" class="hidden">
+              <div class="usage-grid">
+                <article class="usage-stat">
+                  <span class="usage-label">Credits remaining</span>
+                  <strong id="usageRemaining">-</strong>
+                </article>
+                <article class="usage-stat">
+                  <span class="usage-label">Credits used</span>
+                  <strong id="usageUsed">-</strong>
+                </article>
+                <article class="usage-stat">
+                  <span class="usage-label">Credit limit</span>
+                  <strong id="usageLimit">-</strong>
+                </article>
+                <article class="usage-stat">
+                  <span class="usage-label">Next reset</span>
+                  <strong id="usageReset">-</strong>
+                </article>
+              </div>
+
+              <div class="usage-meta">
+                <span id="usageTier" class="pill">Tier: -</span>
+                <span id="usageUpdated" class="pill">Updated: -</span>
+              </div>
+
+              <div class="usage-chart-shell">
+                <div class="usage-chart-header">
+                  <h3>Recent Credit Usage</h3>
+                  <p id="usageChartTotal" class="usage-total">-</p>
+                </div>
+                <div id="usageChart" class="usage-chart"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="card form-card">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Transcribe</p>
+                <h2>New Job</h2>
+              </div>
+              <p id="formStatus" class="status-message"></p>
+            </div>
+
+            <div id="activityPanel" class="activity-panel hidden">
+              <div class="activity-header">
+                <div class="activity-summary">
+                  <span id="activityBadge" class="pill">Idle</span>
+                  <span id="activityElapsed" class="activity-elapsed">00:00</span>
+                </div>
+                <button id="cancelJobButton" class="ghost-button hidden" type="button">Cancel job</button>
+              </div>
+              <p id="activityDetail" class="activity-detail"></p>
+            </div>
+
+            <form id="transcriptionForm" enctype="multipart/form-data">
+              <div class="field-group">
+                <span class="field-label">Source</span>
+                <div class="toggle-grid">
+                  <label class="toggle-card">
+                    <input type="radio" name="source_mode" value="upload" checked>
+                    <span>Upload file</span>
+                  </label>
+                  <label class="toggle-card">
+                    <input type="radio" name="source_mode" value="url">
+                    <span>HTTPS URL</span>
+                  </label>
+                </div>
+              </div>
+
+              <div id="uploadPanel" class="field-group">
+                <label class="field">
+                  <span>Local audio or video files</span>
+                  <input id="fileInput" name="files" type="file" accept="audio/*,video/*" multiple>
+                </label>
+                <p class="result-meta">Select one or more files. Each file becomes its own ElevenLabs transcription job and uses credits separately.</p>
+              </div>
+
+              <div id="urlPanel" class="field-group hidden">
+                <label class="field">
+                  <span>Cloud storage URLs</span>
+                  <textarea id="urlInput" name="cloud_storage_url" rows="4" placeholder="https://example.com/audio-file-1.mp3&#10;https://example.com/audio-file-2.mp3"></textarea>
+                </label>
+                <p class="result-meta">Paste one HTTPS URL per line. Each URL becomes its own ElevenLabs transcription job.</p>
+              </div>
+
+              <div class="form-grid">
+                <label class="field">
+                  <span>Model</span>
+                  <select id="modelSelect" name="model_id">
+                    {% for model in bootstrap.models %}
+                    <option value="{{ model.value }}">{{ model.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>Language</span>
+                  <input id="languageInput" name="language_code" list="languageList" placeholder="Auto detect when blank">
+                  <datalist id="languageList">
+                    {% for language in bootstrap.languages if language.value %}
+                    <option value="{{ language.value }}">{{ language.label }}</option>
+                    {% endfor %}
+                  </datalist>
+                </label>
+
+                <label class="field">
+                  <span>Audio type</span>
+                  <select id="audioTypeSelect" name="audio_type">
+                    {% for option in bootstrap.audioTypes %}
+                    <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+
+                <label class="field">
+                  <span>Timestamps</span>
+                  <select id="timestampsSelect" name="timestamps_granularity">
+                    {% for option in bootstrap.timestamps %}
+                    <option value="{{ option.value }}">{{ option.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+
+              <div class="field-group">
+                <span class="field-label">Output formats</span>
+                <div class="chips">
+                  {% for output in bootstrap.outputFormats %}
+                  <label class="chip">
+                    <input type="checkbox" name="output_formats" value="{{ output.value }}">
+                    <span>{{ output.label }}</span>
+                  </label>
+                  {% endfor %}
+                </div>
+              </div>
+
+              <details class="advanced-panel" open>
+                <summary>Advanced settings</summary>
+                <div class="form-grid">
+                  <label class="checkbox-field">
+                    <input id="diarizeInput" name="diarize" type="checkbox">
+                    <span>Diarize speakers</span>
+                  </label>
+
+                  <label class="checkbox-field">
+                    <input id="tagAudioEventsInput" name="tag_audio_events" type="checkbox">
+                    <span>Tag audio events</span>
+                  </label>
+
+                  <label class="checkbox-field">
+                    <input id="multiChannelInput" name="use_multi_channel" type="checkbox">
+                    <span>Use multi-channel mode</span>
+                  </label>
+
+                <label class="checkbox-field">
+                  <input id="noVerbatimInput" name="no_verbatim" type="checkbox">
+                  <span>Reduce verbatim filler</span>
+                </label>
+
+                <label class="checkbox-field">
+                  <input id="zeroRetentionInput" name="zero_retention" type="checkbox">
+                  <span>Zero-retention request</span>
+                </label>
+
+                <label class="field">
+                  <span>Speaker count</span>
+                  <input id="numSpeakersInput" name="num_speakers" type="number" min="1" max="32" placeholder="Leave blank to auto-detect">
+                </label>
+
+                <label class="field">
+                  <span>Diarization threshold</span>
+                  <input id="diarizationThresholdInput" name="diarization_threshold" type="number" min="0" max="1" step="0.01" placeholder="Optional">
+                </label>
+              </div>
+
+              <div class="field-group full-width">
+                <span class="field-label">Entity detection</span>
+                <div class="chips">
+                  {% for option in bootstrap.entityDetection %}
+                  <label class="chip">
+                    <input type="checkbox" name="entity_detection" value="{{ option.value }}">
+                    <span>{{ option.label }}</span>
+                  </label>
+                  {% endfor %}
+                </div>
+              </div>
+
+              <label class="field full-width">
+                <span>Custom entity types</span>
+                <input id="entityDetectionCustomInput" name="entity_detection_custom" type="text" placeholder="Optional: comma-separated documented entity labels">
+              </label>
+
+              <div class="field-group full-width">
+                <div class="panel-header compact-header">
+                  <div>
+                    <span class="field-label">Keyterm presets</span>
+                    <p class="result-meta">Save and reuse important names, places, and project-specific spellings.</p>
+                  </div>
+                </div>
+                <div class="preset-toolbar">
+                  <select id="keytermPresetSelect">
+                    <option value="">Select a preset</option>
+                  </select>
+                  <button id="loadKeytermPresetButton" class="ghost-button" type="button">Load preset</button>
+                  <button id="saveKeytermPresetButton" class="ghost-button" type="button">Save preset</button>
+                  <button id="deleteKeytermPresetButton" class="ghost-button" type="button">Delete preset</button>
+                </div>
+              </div>
+
+              <label class="field full-width">
+                <span>Keyterms</span>
+                <textarea id="keytermsInput" name="keyterms" rows="4" placeholder="One term per line or comma-separated"></textarea>
+              </label>
+              </details>
+
+              <div class="button-row">
+                <button id="transcribeButton" class="primary-button" type="submit">Start transcription</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="card results-card">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Results</p>
+                <h2>Transcript Viewer</h2>
+              </div>
+              <p id="resultMeta" class="result-meta"></p>
+            </div>
+
+            <div id="resultsEmptyState" class="empty-state">
+              <h3>No transcript loaded</h3>
+              <p>Run a transcription or reopen one from history to see the transcript, exports, and timecoded entries.</p>
+            </div>
+
+            <div id="resultsPanel" class="hidden">
+              <div id="downloads" class="downloads"></div>
+              <section id="deletePanel" class="card delete-card hidden">
+                <div class="panel-header compact-header">
+                  <div>
+                    <h3>Delete This Transcript</h3>
+                    <p id="deleteHelpText" class="result-meta">Choose what should be removed from this app and from ElevenLabs.</p>
+                  </div>
+                </div>
+                <div class="button-row">
+                  <button id="verifyRemoteButton" class="ghost-button" type="button">Check ElevenLabs copy</button>
+                  <button id="hideJobButton" class="ghost-button" type="button">Hide from list</button>
+                  <button id="deleteLocalButton" class="ghost-button" type="button">Delete local data</button>
+                  <button id="deleteRemoteButton" class="ghost-button" type="button">Delete ElevenLabs data</button>
+                  <button id="deleteBothButton" class="danger-button" type="button">Delete both</button>
+                </div>
+              </section>
+              <dl id="metadataGrid" class="metadata-grid"></dl>
+
+              <div class="results-columns">
+                <article class="transcript-card">
+                  <h3>Transcript</h3>
+                  <pre id="transcriptText" class="transcript-text"></pre>
+
+                  <section id="namedTranscriptPanel" class="named-transcript-panel hidden">
+                    <div class="panel-header compact-header">
+                      <div>
+                        <h3>Named Transcript</h3>
+                        <p class="result-meta">Generated locally from your saved speaker-name assignments.</p>
+                      </div>
+                    </div>
+                    <div id="namedDownloads" class="downloads"></div>
+                    <pre id="namedTranscriptText" class="transcript-text"></pre>
+                  </section>
+                </article>
+
+                <article class="timeline-card">
+                  <h3>Timed entries</h3>
+                  <div id="timelineEntries" class="timeline-entries"></div>
+
+                  <section class="insight-panel">
+                    <div class="panel-header compact-header">
+                      <div>
+                        <h3>Audio Events</h3>
+                        <p class="result-meta">Detected non-speech sounds and bracketed event markers.</p>
+                      </div>
+                    </div>
+                    <div id="audioEvents" class="timeline-entries"></div>
+                  </section>
+                </article>
+              </div>
+
+              <div class="results-lower-grid">
+                <article class="transcript-card">
+                  <div class="panel-header compact-header">
+                    <div>
+                      <h3>Speaker Naming</h3>
+                      <p class="result-meta">Review a few quotes for each diarized speaker, then assign names without using more credits.</p>
+                    </div>
+                  </div>
+                  <div id="speakerNamingState" class="empty-note">Speaker naming will appear once a diarized transcript is available.</div>
+                  <div id="speakerProfiles" class="speaker-profiles"></div>
+                  <div id="speakerActions" class="button-row hidden">
+                    <button id="saveSpeakerNamesButton" class="primary-button" type="button">Save speaker names</button>
+                    <button id="clearSpeakerNamesButton" class="ghost-button" type="button">Clear names</button>
+                  </div>
+                </article>
+
+                <article class="transcript-card">
+                  <div class="panel-header compact-header">
+                    <div>
+                      <h3>Entities</h3>
+                      <p class="result-meta">Sensitive or notable entities returned by ElevenLabs when entity detection is enabled.</p>
+                    </div>
+                  </div>
+                  <div id="entitiesList" class="entities-list">
+                    <p class="empty-note">No entity data was returned for this job.</p>
+                  </div>
+                </article>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      window.WORKBENCH_BOOTSTRAP = {{ bootstrap | tojson }};
+    </script>
+    <script src="{{ url_for('static', path='app.js') }}?v={{ asset_versions.app_js }}" defer></script>
+  </body>
+</html>
