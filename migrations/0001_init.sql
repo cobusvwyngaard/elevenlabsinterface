@@ -1,7 +1,7 @@
 -- Job history and app metadata.
--- Ports REBUILD_SPEC.md §7. Unlike the Windows build, response_json_path and
--- output_files[].path hold R2 keys relative to the job (e.g. "<job_id>/transcript.json"),
--- which is the §19 defect fix: nothing stores an absolute machine path.
+-- Ports REBUILD_SPEC.md §7. response_json_path holds an R2 key relative to the bucket
+-- (e.g. "<job_id>/transcript.json"), which is the §19 defect fix: no absolute machine paths.
+-- Exports are not stored: the browser generates them on demand from the transcript.
 
 CREATE TABLE IF NOT EXISTS jobs (
     job_id TEXT PRIMARY KEY,
@@ -20,8 +20,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     effective_settings TEXT NOT NULL,
     transcript_preview TEXT,
     detected_language TEXT,
-    response_json_path TEXT,
-    output_files TEXT NOT NULL
+    response_json_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs (created_at DESC);

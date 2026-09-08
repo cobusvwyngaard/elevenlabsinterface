@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>ElevenLabs Transcription Workbench</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%F0%9F%8E%99%EF%B8%8F</text></svg>">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -224,18 +225,6 @@
                 </label>
               </div>
 
-              <div class="field-group">
-                <span class="field-label">Output formats</span>
-                <div class="chips">
-                  <label class="chip"><input type="checkbox" name="output_formats" value="txt"><span>Plain text</span></label>
-                  <label class="chip"><input type="checkbox" name="output_formats" value="docx"><span>Word document</span></label>
-                  <label class="chip"><input type="checkbox" name="output_formats" value="pdf"><span>PDF</span></label>
-                  <label class="chip"><input type="checkbox" name="output_formats" value="srt"><span>SRT subtitles</span></label>
-                  <label class="chip"><input type="checkbox" name="output_formats" value="vtt"><span>WebVTT subtitles</span></label>
-                  <label class="chip"><input type="checkbox" name="output_formats" value="html"><span>HTML</span></label>
-                </div>
-              </div>
-
               <details class="advanced-panel" open>
                 <summary>Advanced settings</summary>
                 <div class="form-grid">
@@ -438,14 +427,6 @@
           { value: "scribe_v2", label: "Scribe v2" },
           { value: "scribe_v1", label: "Scribe v1" }
         ],
-        outputFormats: [
-          { value: "txt", label: "Plain text" },
-          { value: "docx", label: "Word document" },
-          { value: "pdf", label: "PDF" },
-          { value: "srt", label: "SRT subtitles" },
-          { value: "vtt", label: "WebVTT subtitles" },
-          { value: "html", label: "HTML" }
-        ],
         timestamps: [
           { value: "none", label: "None" },
           { value: "word", label: "Word" },
@@ -493,6 +474,8 @@
         }
       };
     </script>
+    <script src="/transcript-utils.js" defer></script>
+    <script src="/exporters.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>

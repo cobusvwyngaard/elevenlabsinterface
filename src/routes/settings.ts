@@ -4,7 +4,6 @@ import {
   ENTITY_DETECTION_OPTIONS,
   LANGUAGES,
   MODELS,
-  OUTPUT_FORMATS,
   TIMESTAMP_GRANULARITIES,
 } from "../constants";
 import { maskKey } from "../keyStore";
@@ -29,7 +28,6 @@ settingsRoutes.get("/api/settings", async (c) => {
     keyterm_presets: presets,
     audio_types: AUDIO_TYPES,
     models: MODELS,
-    output_formats: OUTPUT_FORMATS,
     timestamps: TIMESTAMP_GRANULARITIES,
     entity_detection: ENTITY_DETECTION_OPTIONS,
     languages: LANGUAGES,

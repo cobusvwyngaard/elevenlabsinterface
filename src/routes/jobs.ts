@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { ElevenLabsAPIError, ElevenLabsClient } from "../elevenlabsClient";
 import { isTerminal, serializeSummary } from "../serialization";
-import { readSpeakerNames, readTranscriptResponse, writeSpeakerNames } from "../storage";
+import { writeSpeakerNames } from "../storage";
 import { httpError, requireApiKey, requireJob, services, translateError, type AppContext } from "./deps";
 
 export const jobRoutes = new Hono<AppContext>();
@@ -54,8 +54,7 @@ jobRoutes.post("/api/jobs/audit-remote", async (c) => {
 
 jobRoutes.get("/api/jobs/:job_id", async (c) => {
   const { repository, service } = services(c);
-  let record = await requireJob(repository, c.req.param("job_id"));
-  record = await service.refreshSavedOutputs(record);
+  const record = await requireJob(repository, c.req.param("job_id"));
   return c.json(await service.detailFor(record));
 });
 
@@ -161,19 +160,7 @@ jobRoutes.post("/api/jobs/:job_id/speaker-names", async (c) => {
       .filter(([, value]) => value)
   );
 
-  const response = await readTranscriptResponse(c.env.TRANSCRIPTS, record.response_json_path);
-  if (!response) {
-    throw httpError(404, "Requested export is not available for this job.");
-  }
-
   await writeSpeakerNames(c.env.TRANSCRIPTS, record.job_id, names);
-  const namedAssets = await service.refreshNamedOutputs(record, response, names);
-  record.output_files = [
-    ...(record.output_files ?? []).filter((asset) => !asset.format.startsWith("named_")),
-    ...namedAssets,
-  ];
-  await repository.saveJob(record);
-
   return c.json(await service.detailFor(record));
 });
 

@@ -1,12 +1,5 @@
 import { TERMINAL_JOB_STATUSES } from "./constants";
-import {
-  buildSpeakerProfiles,
-  buildTimelineEntries,
-  extractAudioEvents,
-  extractEntities,
-  formatTranscriptText,
-} from "./transcriptUtils";
-import type { ExportAsset, JobRecord, TranscriptResponse } from "./types";
+import type { JobRecord } from "./types";
 
 const PROMOTED_KEYS = [
   "batch_id",
@@ -30,10 +23,6 @@ export function isTerminal(record: JobRecord): boolean {
 
 export function isHidden(record: JobRecord): boolean {
   return Boolean(record.effective_settings?.hidden_at);
-}
-
-function downloadUrl(jobId: string, format: string): string {
-  return `/downloads/${jobId}/${format}`;
 }
 
 function promoted(record: JobRecord): Record<string, unknown> {
@@ -64,50 +53,30 @@ export function serializeSummary(record: JobRecord): Record<string, unknown> {
     detected_language: record.detected_language,
     is_hidden: isHidden(record),
     ...promoted(record),
-    outputs: (record.output_files ?? [])
-      .filter((asset) => !asset.format.startsWith("named_"))
-      .map((asset) => ({
-        format: asset.format,
-        label: asset.label,
-        download_url: downloadUrl(record.job_id, asset.format),
-      })),
   };
 }
 
-function serializeAssets(jobId: string, assets: ExportAsset[]) {
-  return assets.map((asset) => ({
-    format: asset.format,
-    label: asset.label,
-    filename: asset.filename,
-    content_type: asset.content_type,
-    size: asset.size,
-    download_url: downloadUrl(jobId, asset.format),
-  }));
-}
-
+/**
+ * Detail carries a pointer to the stored transcript rather than anything derived from it.
+ * The browser fetches that once per job and produces the transcript text, timeline, speaker
+ * profiles and every export locally — none of which the Worker could afford to compute.
+ */
 export function serializeDetail(
   record: JobRecord,
-  response: TranscriptResponse | null,
-  speakerNames: Record<string, string> = {}
+  speakerNames: Record<string, string>,
+  exportMetadata: Record<string, unknown>
 ): Record<string, unknown> {
-  const allAssets = record.output_files ?? [];
-  const outputs = allAssets.filter((asset) => !asset.format.startsWith("named_"));
-  const namedOutputs = allAssets.filter((asset) => asset.format.startsWith("named_"));
-  const hasNames = Object.keys(speakerNames).length > 0;
+  const available = record.status === "success" && Boolean(record.response_json_path);
 
   return {
     ...serializeSummary(record),
     language: record.language,
     effective_settings: record.effective_settings,
-    transcript_text: response ? formatTranscriptText(response) : null,
     speaker_name_map: speakerNames,
-    named_transcript_text: response && hasNames ? formatTranscriptText(response, speakerNames) : null,
-    outputs: serializeAssets(record.job_id, outputs),
-    named_outputs: serializeAssets(record.job_id, namedOutputs),
-    timeline_entries: response ? buildTimelineEntries(response, 200, hasNames ? speakerNames : null) : [],
-    speaker_profiles: response ? buildSpeakerProfiles(response, speakerNames) : [],
-    audio_events: response ? extractAudioEvents(response) : [],
-    entities: response ? extractEntities(response) : [],
-    response,
+    export_metadata: exportMetadata,
+    transcript_url: available ? `/downloads/${record.job_id}/json` : null,
+    outputs: available
+      ? [{ format: "json", label: "Raw JSON", download_url: `/downloads/${record.job_id}/json` }]
+      : [],
   };
 }

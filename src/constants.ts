@@ -18,15 +18,6 @@ export const MODELS: Option[] = [
   { value: "scribe_v1", label: "Scribe v1" },
 ];
 
-export const OUTPUT_FORMATS: Option[] = [
-  { value: "txt", label: "Plain text" },
-  { value: "docx", label: "Word document" },
-  { value: "pdf", label: "PDF" },
-  { value: "srt", label: "SRT subtitles" },
-  { value: "vtt", label: "WebVTT subtitles" },
-  { value: "html", label: "HTML" },
-];
-
 export const TIMESTAMP_GRANULARITIES: Option[] = [
   { value: "none", label: "None" },
   { value: "word", label: "Word" },
@@ -66,26 +57,14 @@ export const LANGUAGES: Option[] = [
   { value: "zh", label: "Chinese" },
 ];
 
-export const OUTPUT_CONTENT_TYPES: Record<string, string> = {
-  json: "application/json",
-  txt: "text/plain; charset=utf-8",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  pdf: "application/pdf",
-  srt: "application/x-subrip",
-  vtt: "text/vtt; charset=utf-8",
-  html: "text/html; charset=utf-8",
-};
-
 function labelMap(options: Option[]): Record<string, string> {
   return Object.fromEntries(options.map((option) => [option.value, option.label]));
 }
 
 export const AUDIO_TYPE_LABELS = labelMap(AUDIO_TYPES);
 export const MODEL_LABELS = labelMap(MODELS);
-export const OUTPUT_LABELS = labelMap(OUTPUT_FORMATS);
 export const ENTITY_DETECTION_LABELS = labelMap(ENTITY_DETECTION_OPTIONS);
 
-export const VALID_OUTPUT_FORMATS = new Set(OUTPUT_FORMATS.map((option) => option.value));
 export const VALID_MODELS = new Set(MODELS.map((option) => option.value));
 export const VALID_TIMESTAMPS = new Set(TIMESTAMP_GRANULARITIES.map((option) => option.value));
 export const VALID_ENTITY_DETECTION = new Set(ENTITY_DETECTION_OPTIONS.map((option) => option.value));

@@ -1,4 +1,4 @@
-import type { ExportAsset, JobRecord, KeytermPreset } from "./types";
+import type { JobRecord, KeytermPreset } from "./types";
 
 interface JobRow {
   job_id: string;
@@ -18,7 +18,6 @@ interface JobRow {
   transcript_preview: string | null;
   detected_language: string | null;
   response_json_path: string | null;
-  output_files: string;
 }
 
 function parseJson<T>(value: string | null, fallback: T): T {
@@ -36,7 +35,6 @@ function deserializeRow(row: JobRow): JobRecord {
   return {
     ...row,
     effective_settings: parseJson(row.effective_settings, {}),
-    output_files: parseJson<ExportAsset[]>(row.output_files, []),
   };
 }
 
@@ -49,8 +47,8 @@ export class JobRepository {
         `INSERT OR REPLACE INTO jobs (
           job_id, transcription_id, created_at, source_type, source_label, model, language,
           audio_type, status, status_detail, error_message, started_at, completed_at,
-          effective_settings, transcript_preview, detected_language, response_json_path, output_files
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          effective_settings, transcript_preview, detected_language, response_json_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         record.job_id,
@@ -69,8 +67,7 @@ export class JobRepository {
         JSON.stringify(record.effective_settings ?? {}),
         record.transcript_preview,
         record.detected_language,
-        record.response_json_path,
-        JSON.stringify(record.output_files ?? [])
+        record.response_json_path
       )
       .run();
   }

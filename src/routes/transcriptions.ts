@@ -27,7 +27,6 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
     language_code: stringField(form, "language_code"),
     audio_type: stringField(form, "audio_type"),
     timestamps_granularity: stringField(form, "timestamps_granularity"),
-    output_formats: stringList(form, "output_formats"),
     diarize: stringField(form, "diarize"),
     tag_audio_events: stringField(form, "tag_audio_events"),
     use_multi_channel: stringField(form, "use_multi_channel"),
@@ -88,7 +87,7 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
       batchIndex: batchId ? index + 1 : undefined,
       batchCount: batchId ? items.length : undefined,
     });
-    details.push(serializeDetail(record, null, {}));
+    details.push(serializeDetail(record, {}, service.metadataFor(record)));
   }
 
   if (batchId) {

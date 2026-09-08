@@ -17,7 +17,6 @@ export interface TranscriptionSubmission {
   model_id: string;
   language_code: string | null;
   audio_type: string;
-  output_formats: string[];
   diarize: boolean;
   num_speakers: number | null;
   diarization_threshold: number | null;
@@ -34,22 +33,11 @@ export interface TranscriptionSubmission {
   file_content_type: string | null;
 }
 
-export interface ExportAsset {
-  format: string;
-  filename: string;
-  content_type: string;
-  /** R2 key, relative to the bucket root: "<job_id>/<filename>". */
-  path: string;
-  label: string;
-  size: number;
-}
-
 export interface EffectiveSettings {
   source_mode?: string;
   model_id?: string;
   language_code?: string | null;
   audio_type?: string;
-  output_formats?: string[];
   diarize?: boolean;
   num_speakers?: number | null;
   diarization_threshold?: number | null;
@@ -99,7 +87,6 @@ export interface JobRecord {
   transcript_preview: string | null;
   detected_language: string | null;
   response_json_path: string | null;
-  output_files: ExportAsset[];
 }
 
 export interface KeytermPreset {

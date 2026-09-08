@@ -11,6 +11,7 @@ const state = {
   keytermPresets: [],
   showHidden: false,
   hiddenJobCount: 0,
+  transcriptCache: new Map(),
 };
 
 const elements = {
@@ -167,10 +168,6 @@ function updateSourcePanels() {
   elements.urlPanel.classList.toggle("hidden", mode !== "url");
 }
 
-function selectedOutputFormats() {
-  return [...document.querySelectorAll("input[name='output_formats']:checked")].map((input) => input.value);
-}
-
 function selectedEntityDetection() {
   return elements.entityDetectionInputs.filter((input) => input.checked).map((input) => input.value);
 }
@@ -206,12 +203,6 @@ function applyDefaults(defaults) {
   if (!defaults || Object.keys(defaults).length === 0) {
     elements.audioTypeSelect.value = "meeting";
     applyPreset("meeting");
-    ["txt", "srt"].forEach((format) => {
-      const box = document.querySelector(`input[name='output_formats'][value='${format}']`);
-      if (box) {
-        box.checked = true;
-      }
-    });
     return;
   }
 
@@ -234,9 +225,6 @@ function applyDefaults(defaults) {
   elements.urlInput.value = defaults.cloud_storage_url || "";
   elements.entityDetectionCustomInput.value = defaults.entity_detection_custom || "";
 
-  document.querySelectorAll("input[name='output_formats']").forEach((input) => {
-    input.checked = (defaults.output_formats || []).includes(input.value);
-  });
   elements.entityDetectionInputs.forEach((input) => {
     input.checked = (defaults.entity_detection || []).includes(input.value);
   });
@@ -483,14 +471,92 @@ function resetUsagePanel(message, tone = "") {
   setStatus(elements.usageStatus, message, tone);
 }
 
-function renderDownloads(target, outputs) {
-  target.innerHTML = (outputs || [])
-    .map(
-      (output) => `
-        <a class="download-link" href="${escapeHtml(output.download_url)}">${escapeHtml(output.label)}</a>
-      `
-    )
-    .join("");
+// The Worker stores the ElevenLabs response untouched, so everything shown below -- the
+// transcript, timeline, speaker profiles, and every export -- is derived here in the browser.
+
+async function loadTranscriptResponse(job) {
+  if (state.transcriptCache.has(job.job_id)) {
+    return state.transcriptCache.get(job.job_id);
+  }
+  const response = await fetch(job.transcript_url);
+  if (!response.ok) {
+    throw new Error("Could not load the stored transcript.");
+  }
+  const parsed = await response.json();
+  state.transcriptCache.set(job.job_id, parsed);
+  return parsed;
+}
+
+async function attachTranscriptData(job) {
+  if (job.status !== "success" || !job.transcript_url) {
+    job.transcript_response = null;
+    job.transcript_text = null;
+    job.named_transcript_text = null;
+    job.timeline_entries = [];
+    job.audio_events = [];
+    job.entities = [];
+    job.speaker_profiles = [];
+    return job;
+  }
+
+  const response = await loadTranscriptResponse(job);
+  const names = job.speaker_name_map || {};
+  const hasNames = Object.keys(names).length > 0;
+  const T = window.TranscriptUtils;
+
+  job.transcript_response = response;
+  job.transcript_text = T.formatTranscriptText(response);
+  job.named_transcript_text = hasNames ? T.formatTranscriptText(response, names) : null;
+  job.timeline_entries = T.buildTimelineEntries(response, 200, hasNames ? names : null);
+  job.audio_events = T.extractAudioEvents(response);
+  job.entities = T.extractEntities(response);
+  job.speaker_profiles = T.buildSpeakerProfiles(response, names);
+  return job;
+}
+
+function renderExportControls(target, job, named) {
+  target.innerHTML = "";
+  if (!job.transcript_response) {
+    return;
+  }
+
+  if (!named) {
+    const raw = document.createElement("a");
+    raw.className = "download-link";
+    raw.href = job.transcript_url;
+    raw.textContent = "Raw JSON";
+    target.appendChild(raw);
+  }
+
+  const speakerNames = named ? job.speaker_name_map || {} : null;
+  const stem = named ? "named-transcript" : "transcript";
+
+  for (const definition of window.Exporters.FORMATS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "download-link";
+    button.textContent = named ? `Named ${definition.label}` : definition.label;
+    button.addEventListener("click", async () => {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Building...";
+      try {
+        await window.Exporters.download(
+          definition.format,
+          job.transcript_response,
+          speakerNames,
+          job.export_metadata || {},
+          stem
+        );
+      } catch (error) {
+        setStatus(elements.formStatus, error.message || "Could not build that export.", "error");
+      } finally {
+        button.textContent = original;
+        button.disabled = false;
+      }
+    });
+    target.appendChild(button);
+  }
 }
 
 function renderTimeline(entries, target, emptyMessage) {
@@ -657,9 +723,14 @@ function clearResults() {
   }
 }
 
-function renderJob(job) {
+async function renderJob(job) {
   state.activeJobId = job.job_id;
   renderHistory();
+  try {
+    await attachTranscriptData(job);
+  } catch (error) {
+    setStatus(elements.formStatus, error.message, "error");
+  }
   renderActivity(job);
   elements.resultsEmptyState.classList.add("hidden");
   elements.resultsPanel.classList.remove("hidden");
@@ -732,7 +803,7 @@ function renderJob(job) {
     elements.transcriptText.textContent = `${job.status_detail || "The transcription is still in progress."}\n\nThis batch endpoint does not expose a true percent-complete value, so the app tracks job stages and elapsed time instead.`;
   }
 
-  renderDownloads(elements.downloads, job.outputs);
+  renderExportControls(elements.downloads, job, false);
   renderTimeline(
     job.timeline_entries,
     elements.timelineEntries,
@@ -762,10 +833,10 @@ function renderJob(job) {
     elements.deleteHelpText.textContent = "You can hide this job from Recent Jobs. This job no longer has a stored ElevenLabs transcript ID, so only local deletion is available.";
   }
 
-  if (job.named_transcript_text || (job.named_outputs && job.named_outputs.length)) {
+  if (job.named_transcript_text) {
     elements.namedTranscriptPanel.classList.remove("hidden");
-    elements.namedTranscriptText.textContent = job.named_transcript_text || "Named transcript available for download.";
-    renderDownloads(elements.namedDownloads, job.named_outputs);
+    elements.namedTranscriptText.textContent = job.named_transcript_text;
+    renderExportControls(elements.namedDownloads, job, true);
   } else {
     elements.namedTranscriptPanel.classList.add("hidden");
     elements.namedTranscriptText.textContent = "";
@@ -775,7 +846,7 @@ function renderJob(job) {
 
 async function openJob(jobId) {
   const job = await fetchJson(`/api/jobs/${jobId}`);
-  renderJob(job);
+  await renderJob(job);
   if (job.is_terminal) {
     stopPolling();
   } else {
@@ -849,6 +920,7 @@ async function deleteJobData(deleteLocal, deleteRemote) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ delete_local: deleteLocal, delete_remote: deleteRemote }),
     });
+    state.transcriptCache.delete(state.activeJobId);
     setStatus(elements.formStatus, payload.message || "Deletion completed.", "success");
     await loadJobs();
     if (payload.job_removed) {
@@ -960,7 +1032,6 @@ function buildFormData() {
   data.append("keyterms", elements.keytermsInput.value.trim());
   data.append("entity_detection_custom", elements.entityDetectionCustomInput.value.trim());
   selectedEntityDetection().forEach((value) => data.append("entity_detection", value));
-  selectedOutputFormats().forEach((format) => data.append("output_formats", format));
   return data;
 }
 
@@ -971,7 +1042,7 @@ async function pollJobOnce(jobId) {
   state.pollInFlight = true;
   try {
     const job = await fetchJson(`/api/jobs/${jobId}`);
-    renderJob(job);
+    await renderJob(job);
     await loadJobs(jobId);
     if (job.is_terminal) {
       const pendingJob = nextPendingJob(jobId);

@@ -4,22 +4,14 @@ import {
   INTERRUPTED_JOB_MESSAGE,
   MODEL_LABELS,
   TERMINAL_JOB_STATUSES,
-  TRANSCRIPT_PREVIEW_LIMIT,
 } from "./constants";
 import type { JobRepository } from "./db";
 import { ElevenLabsAPIError, ElevenLabsClient } from "./elevenlabsClient";
-import { createExports } from "./exporters";
+import { scanTranscriptMetadata } from "./responseScan";
 import { isHidden, isTerminal, serializeDetail } from "./serialization";
-import {
-  deleteJobObjects,
-  deleteNamedExports,
-  readSpeakerNames,
-  readTranscriptResponse,
-  uploadKey as makeUploadKey,
-} from "./storage";
+import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames, uploadKey as makeUploadKey } from "./storage";
 import { buildApiFields, effectiveSettings, submissionDefaults } from "./transcription";
-import { extractDetectedLanguage, formatTranscriptText } from "./transcriptUtils";
-import type { Env, ExportAsset, JobRecord, TranscriptResponse, TranscriptionSubmission } from "./types";
+import type { Env, JobRecord, TranscriptionSubmission } from "./types";
 
 /** A job still non-terminal past this is unrecoverable: no consumer invocation lives that long. */
 const STALE_JOB_MINUTES = 20;
@@ -86,7 +78,6 @@ export class JobService {
       transcript_preview: null,
       detected_language: null,
       response_json_path: null,
-      output_files: [],
     };
 
     await this.repository.saveJob(record);
@@ -96,7 +87,10 @@ export class JobService {
     return record;
   }
 
-  /** Runs inside the Queue consumer. */
+  /**
+   * Runs inside the Queue consumer. The transcript is moved from ElevenLabs to R2 as opaque
+   * bytes; every derived view of it is produced in the browser instead.
+   */
   async runJob(jobId: string, apiKey: string): Promise<void> {
     const record = await this.repository.getJob(jobId);
     if (!record || isTerminal(record)) {
@@ -126,7 +120,7 @@ export class JobService {
         };
       }
 
-      const response = await this.client.transcribe(apiKey, fields, {
+      const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
         file,
       });
@@ -136,37 +130,22 @@ export class JobService {
         return;
       }
 
-      const finalizing = await this.repository.getJob(jobId);
-      if (!finalizing) {
-        return;
-      }
-      finalizing.status = "finalizing";
-      finalizing.status_detail = "Transcript received. Writing exports.";
-      finalizing.transcription_id =
-        (typeof response.transcription_id === "string" ? response.transcription_id : null) ??
-        (typeof response.request_id === "string" ? response.request_id : null);
-      await this.repository.saveJob(finalizing);
+      const transcriptKey = `${jobId}/transcript.json`;
+      await this.env.TRANSCRIPTS.put(transcriptKey, bytes, {
+        httpMetadata: { contentType: "application/json" },
+      });
 
-      const assets = await createExports(
-        this.env.TRANSCRIPTS,
-        jobId,
-        response,
-        settings.output_formats ?? [],
-        this.metadataFor(finalizing)
-      );
+      const scanned = scanTranscriptMetadata(bytes);
 
-      if (await this.isCancelled(jobId)) {
-        return;
-      }
-
-      finalizing.status = "success";
-      finalizing.status_detail = "Transcription completed.";
-      finalizing.completed_at = nowIso();
-      finalizing.output_files = assets;
-      finalizing.response_json_path = `${jobId}/transcript.json`;
-      finalizing.detected_language = extractDetectedLanguage(response);
-      finalizing.transcript_preview = formatTranscriptText(response).slice(0, TRANSCRIPT_PREVIEW_LIMIT);
-      await this.repository.saveJob(finalizing);
+      const current = (await this.repository.getJob(jobId)) ?? record;
+      current.status = "success";
+      current.status_detail = "Transcription completed.";
+      current.completed_at = nowIso();
+      current.response_json_path = transcriptKey;
+      current.transcription_id = scanned.transcriptionId;
+      current.detected_language = scanned.languageCode;
+      current.transcript_preview = scanned.preview;
+      await this.repository.saveJob(current);
 
       if (settings.upload_key) {
         await this.env.TRANSCRIPTS.delete(settings.upload_key);
@@ -201,7 +180,6 @@ export class JobService {
       model_id: settings.model_id ?? record.model,
       language_code: settings.language_code ?? null,
       audio_type: settings.audio_type ?? record.audio_type,
-      output_formats: settings.output_formats ?? [],
       diarize: settings.diarize ?? false,
       num_speakers: settings.num_speakers ?? null,
       diarization_threshold: settings.diarization_threshold ?? null,
@@ -219,13 +197,15 @@ export class JobService {
     };
   }
 
-  private metadataFor(record: JobRecord): Record<string, unknown> {
+  /** Metadata the browser stamps onto generated exports. */
+  metadataFor(record: JobRecord): Record<string, unknown> {
     const settings = record.effective_settings ?? {};
     return {
       Source: record.source_label,
       Model: MODEL_LABELS[record.model] ?? record.model,
       Preset: AUDIO_TYPE_LABELS[record.audio_type] ?? record.audio_type,
       "Requested language": record.language ?? "Auto detect",
+      "Detected language": record.detected_language,
       Created: record.created_at,
       "Entity detection": settings.entity_detection ?? [],
     };
@@ -242,76 +222,13 @@ export class JobService {
     return record;
   }
 
-  /** Rebuilds exports from the stored transcript JSON so a deleted file comes back on demand. */
-  async refreshSavedOutputs(record: JobRecord): Promise<JobRecord> {
-    if (record.status !== "success" || !record.response_json_path) {
-      return record;
-    }
-
-    const response = await readTranscriptResponse(this.env.TRANSCRIPTS, record.response_json_path);
-    if (!response) {
-      return record;
-    }
-
-    const settings = record.effective_settings ?? {};
-    const existing = record.output_files ?? [];
-    const expected = ["json", ...(settings.output_formats ?? [])];
-    const present = new Set(existing.filter((asset) => !asset.format.startsWith("named_")).map((a) => a.format));
-    const missing = expected.some((format) => !present.has(format));
-
-    if (!missing) {
-      return record;
-    }
-
-    const assets = await createExports(
-      this.env.TRANSCRIPTS,
-      record.job_id,
-      response,
-      settings.output_formats ?? [],
-      this.metadataFor(record)
-    );
-    record.output_files = [...assets, ...existing.filter((asset) => asset.format.startsWith("named_"))];
-    record.detected_language = extractDetectedLanguage(response);
-    record.transcript_preview = formatTranscriptText(response).slice(0, TRANSCRIPT_PREVIEW_LIMIT);
-    await this.repository.saveJob(record);
-    return record;
-  }
-
-  async refreshNamedOutputs(
-    record: JobRecord,
-    response: TranscriptResponse,
-    speakerNames: Record<string, string>
-  ): Promise<ExportAsset[]> {
-    if (Object.keys(speakerNames).length === 0) {
-      return [];
-    }
-
-    const settings = record.effective_settings ?? {};
-    return createExports(
-      this.env.TRANSCRIPTS,
-      record.job_id,
-      response,
-      settings.output_formats ?? [],
-      { ...this.metadataFor(record), "Speaker names": speakerNames },
-      {
-        speakerNames,
-        filenameStem: "named-transcript",
-        formatPrefix: "named_",
-        labelPrefix: "Named ",
-        includeJson: false,
-      }
-    );
-  }
-
   async deleteLocalJobData(record: JobRecord): Promise<void> {
     await deleteJobObjects(this.env.TRANSCRIPTS, record.job_id);
     await this.repository.deleteJob(record.job_id);
   }
 
   async clearSpeakerNames(record: JobRecord): Promise<JobRecord> {
-    await deleteNamedExports(this.env.TRANSCRIPTS, record.job_id);
-    record.output_files = (record.output_files ?? []).filter((asset) => !asset.format.startsWith("named_"));
-    await this.repository.saveJob(record);
+    await deleteSpeakerNames(this.env.TRANSCRIPTS, record.job_id);
     return record;
   }
 
@@ -402,11 +319,7 @@ export class JobService {
     return records;
   }
 
-  async saveRemotePresenceState(
-    record: JobRecord,
-    status: string,
-    message: string | null
-  ): Promise<JobRecord> {
+  async saveRemotePresenceState(record: JobRecord, status: string, message: string | null): Promise<JobRecord> {
     const settings = record.effective_settings ?? {};
     settings.remote_presence_status = status;
     settings.remote_presence_message = message;
@@ -446,9 +359,8 @@ export class JobService {
   }
 
   async detailFor(record: JobRecord): Promise<Record<string, unknown>> {
-    const response = await readTranscriptResponse(this.env.TRANSCRIPTS, record.response_json_path);
     const speakerNames = await readSpeakerNames(this.env.TRANSCRIPTS, record.job_id);
-    return serializeDetail(record, response, speakerNames);
+    return serializeDetail(record, speakerNames, this.metadataFor(record));
   }
 
   hidden(record: JobRecord): boolean {

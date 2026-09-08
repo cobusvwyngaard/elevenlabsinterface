@@ -1,9 +1,4 @@
-import {
-  VALID_ENTITY_DETECTION,
-  VALID_MODELS,
-  VALID_OUTPUT_FORMATS,
-  VALID_TIMESTAMPS,
-} from "./constants";
+import { VALID_ENTITY_DETECTION, VALID_MODELS, VALID_TIMESTAMPS } from "./constants";
 import { AUDIO_TYPE_PRESETS, presetFor } from "./presets";
 import type { EffectiveSettings, TranscriptionSubmission } from "./types";
 
@@ -16,7 +11,6 @@ export interface SubmissionPayload {
   language_code?: string;
   audio_type?: string;
   timestamps_granularity?: string;
-  output_formats?: string[];
   diarize?: string;
   tag_audio_events?: string;
   use_multi_channel?: string;
@@ -66,16 +60,6 @@ export function buildSubmission(payload: SubmissionPayload, file: SubmissionFile
   const audioType = (payload.audio_type || "meeting").trim();
   if (!(audioType in AUDIO_TYPE_PRESETS)) {
     throw new SubmissionError("Choose a supported audio type.");
-  }
-
-  const outputFormats = (payload.output_formats ?? []).map((item) => item.trim()).filter(Boolean);
-  if (outputFormats.length === 0) {
-    throw new SubmissionError("Choose at least one output format.");
-  }
-  for (const format of outputFormats) {
-    if (!VALID_OUTPUT_FORMATS.has(format)) {
-      throw new SubmissionError(`Unsupported output format: ${format}`);
-    }
   }
 
   const cloudStorageUrl = (payload.cloud_storage_url || "").trim();
@@ -209,7 +193,6 @@ export function buildSubmission(payload: SubmissionPayload, file: SubmissionFile
     model_id: modelId,
     language_code: languageCode,
     audio_type: audioType,
-    output_formats: outputFormats,
     diarize,
     num_speakers: numSpeakers,
     diarization_threshold: diarizationThreshold,
@@ -269,7 +252,6 @@ export function submissionDefaults(submission: TranscriptionSubmission): Record<
     language_code: submission.language_code ?? "",
     audio_type: submission.audio_type,
     timestamps_granularity: submission.timestamps_granularity,
-    output_formats: submission.output_formats,
     diarize: submission.diarize,
     tag_audio_events: submission.tag_audio_events,
     use_multi_channel: submission.use_multi_channel,
@@ -290,7 +272,6 @@ export function effectiveSettings(submission: TranscriptionSubmission): Effectiv
     model_id: submission.model_id,
     language_code: submission.language_code,
     audio_type: submission.audio_type,
-    output_formats: submission.output_formats,
     diarize: submission.diarize,
     num_speakers: submission.num_speakers,
     diarization_threshold: submission.diarization_threshold,

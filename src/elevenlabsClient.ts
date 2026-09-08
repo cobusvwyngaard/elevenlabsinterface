@@ -119,11 +119,15 @@ export class ElevenLabsClient {
     return payload as T;
   }
 
+  /**
+   * Returns the raw response bytes. The transcript is never parsed here: on a Workers Free
+   * invocation, JSON.parse of a long transcript would consume most of the 10ms CPU budget.
+   */
   async transcribe(
     apiKey: string,
     fields: [string, string][],
     options: { enableLogging: boolean; file?: { name: string; type: string; body: ArrayBuffer }; signal?: AbortSignal }
-  ): Promise<TranscriptResponse> {
+  ): Promise<ArrayBuffer> {
     const url = new URL(this.apiUrl);
     url.searchParams.set("enable_logging", options.enableLogging ? "true" : "false");
 
@@ -150,7 +154,22 @@ export class ElevenLabsClient {
       }
     );
 
-    return this.readJson<TranscriptResponse>(response, "ElevenLabs rejected the transcription request.");
+    if (!response.ok) {
+      // Error bodies are small, so parsing one costs nothing meaningful.
+      let payload: unknown = null;
+      try {
+        payload = await response.json();
+      } catch {
+        /* some upstream errors have no JSON body */
+      }
+      throw new ElevenLabsAPIError(
+        response.status,
+        extractMessage(payload) ?? "ElevenLabs rejected the transcription request.",
+        payload
+      );
+    }
+
+    return response.arrayBuffer();
   }
 
   async getSubscription(apiKey: string): Promise<Record<string, unknown>> {
