@@ -18,7 +18,7 @@
     {
       "binding": "DB",
       "database_name": "workbench",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "ad3c6156-361c-476d-a9ee-d01fdbf2f379",
       "migrations_dir": "migrations"
     }
   ],
