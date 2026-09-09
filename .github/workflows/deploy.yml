@@ -1,0 +1,30 @@
+name: Deploy to Cloudflare
+
+# Deploys with Wrangler from CI, so no local Node or Git install is needed.
+# Requires a CLOUDFLARE_API_TOKEN repository secret.
+
+on:
+  push:
+    branches:
+      - main
+      - claude/elevenlabs-cloudflare-rebuild-lcbxi4
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npx tsc --noEmit
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
