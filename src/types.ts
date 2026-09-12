@@ -10,6 +10,7 @@ export interface JobMessage {
   job_id: string;
   /** R2 key holding the uploaded audio, for upload-mode jobs. */
   upload_key?: string;
+  upload_bytes?: number;
 }
 
 export interface TranscriptionSubmission {
@@ -33,7 +34,15 @@ export interface TranscriptionSubmission {
   file_content_type: string | null;
 }
 
+/** One traceable step in a job's life, appended as it happens. */
+export interface JobStage {
+  stage: string;
+  at: string;
+  detail?: string;
+}
+
 export interface EffectiveSettings {
+  stages?: JobStage[];
   source_mode?: string;
   model_id?: string;
   language_code?: string | null;
@@ -65,6 +74,7 @@ export interface EffectiveSettings {
   last_known_transcription_id?: string | null;
 
   upload_key?: string;
+  upload_bytes?: number;
   cloud_storage_url?: string | null;
   [key: string]: unknown;
 }

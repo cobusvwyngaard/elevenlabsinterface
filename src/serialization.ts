@@ -52,6 +52,8 @@ export function serializeSummary(record: JobRecord): Record<string, unknown> {
     transcript_preview: record.transcript_preview,
     detected_language: record.detected_language,
     is_hidden: isHidden(record),
+    stages: record.effective_settings?.stages ?? [],
+    upload_bytes: record.effective_settings?.upload_bytes ?? null,
     ...promoted(record),
   };
 }

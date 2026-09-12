@@ -26,6 +26,18 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Appends a stage marker. The browser renders these as a traceable timeline, which is the
+ * only way to tell a slow upload apart from a stalled one.
+ */
+function addStage(record: JobRecord, stage: string, detail?: string): void {
+  const settings = record.effective_settings ?? {};
+  const stages = settings.stages ?? [];
+  stages.push({ stage, at: nowIso(), ...(detail ? { detail } : {}) });
+  settings.stages = stages;
+  record.effective_settings = settings;
+}
+
 export class JobService {
   private readonly client: ElevenLabsClient;
 
@@ -58,6 +70,7 @@ export class JobService {
         httpMetadata: { contentType: submission.file_content_type ?? "application/octet-stream" },
       });
       settings.upload_key = uploadKey;
+      settings.upload_bytes = fileBody.byteLength;
     }
 
     const record: JobRecord = {
@@ -80,6 +93,11 @@ export class JobService {
       response_json_path: null,
     };
 
+    if (uploadKey) {
+      addStage(record, "audio_stored", `${(fileBody!.byteLength / 1024 / 1024).toFixed(1)} MB received`);
+    }
+    addStage(record, "queued");
+
     await this.repository.saveJob(record);
     await this.repository.setLastUsedDefaults(submissionDefaults(submission));
     await this.env.JOB_QUEUE.send({ job_id: jobId, upload_key: uploadKey });
@@ -100,8 +118,8 @@ export class JobService {
     const settings = record.effective_settings ?? {};
     record.status = "running";
     record.started_at = nowIso();
-    record.status_detail =
-      "Uploading to ElevenLabs and waiting for the transcript. This job will keep waiting for up to about 13 minutes.";
+    record.status_detail = "Picked up by a worker.";
+    addStage(record, "picked_up");
     await this.repository.saveJob(record);
 
     try {
@@ -118,7 +136,13 @@ export class JobService {
           type: object.httpMetadata?.contentType ?? "application/octet-stream",
           body: await object.arrayBuffer(),
         };
+        addStage(record, "audio_loaded", `${(file.body.byteLength / 1024 / 1024).toFixed(1)} MB`);
       }
+
+      record.status_detail =
+        "Sent to ElevenLabs. Waiting for the transcript — this job waits up to about 13 minutes.";
+      addStage(record, "sent_to_elevenlabs");
+      await this.repository.saveJob(record);
 
       const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
@@ -138,6 +162,13 @@ export class JobService {
       const scanned = scanTranscriptMetadata(bytes);
 
       const current = (await this.repository.getJob(jobId)) ?? record;
+      current.effective_settings = record.effective_settings;
+      addStage(
+        current,
+        "transcript_received",
+        `${(bytes.byteLength / 1024).toFixed(0)} KB of transcript JSON`
+      );
+      addStage(current, "done");
       current.status = "success";
       current.status_detail = "Transcription completed.";
       current.completed_at = nowIso();
@@ -155,6 +186,8 @@ export class JobService {
         return;
       }
       const current = (await this.repository.getJob(jobId)) ?? record;
+      current.effective_settings = record.effective_settings;
+      addStage(current, "failed");
       current.status = "error";
       current.completed_at = nowIso();
       current.error_message =
@@ -216,6 +249,7 @@ export class JobService {
       return record;
     }
     record.status = "cancelled";
+    addStage(record, "cancelled");
     record.status_detail = CANCELLED_JOB_MESSAGE;
     record.completed_at = nowIso();
     await this.repository.saveJob(record);

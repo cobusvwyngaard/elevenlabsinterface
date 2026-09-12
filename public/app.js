@@ -78,6 +78,9 @@ const elements = {
   activityBadge: document.getElementById("activityBadge"),
   activityElapsed: document.getElementById("activityElapsed"),
   activityDetail: document.getElementById("activityDetail"),
+  tracePanel: document.getElementById("tracePanel"),
+  traceList: document.getElementById("traceList"),
+  traceSummary: document.getElementById("traceSummary"),
   usagePanel: document.getElementById("usagePanel"),
   usageStatus: document.getElementById("usageStatus"),
   refreshUsageButton: document.getElementById("refreshUsageButton"),
@@ -269,6 +272,177 @@ function syncControls() {
   elements.diarizationThresholdInput.disabled = multiChannel || !diarize || hasSpeakerCount;
 }
 
+// Cloudflare returns 413 above this, whatever the plan's other limits are.
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const STALL_AFTER_MS = 20000;
+
+// Ordered pipeline. Client stages are observed in the browser; server stages arrive on the
+// job record. Without this, a slow upload and a dead connection look identical.
+const TRACE_STEPS = [
+  { key: "uploading", label: "Uploading to Cloudflare", side: "client" },
+  { key: "accepted", label: "Accepted by Cloudflare", side: "client" },
+  { key: "audio_stored", label: "Audio saved to storage", side: "server" },
+  { key: "queued", label: "Queued for processing", side: "server" },
+  { key: "picked_up", label: "Picked up by a worker", side: "server" },
+  { key: "audio_loaded", label: "Audio loaded from storage", side: "server" },
+  { key: "sent_to_elevenlabs", label: "Sent to ElevenLabs", side: "server" },
+  { key: "transcript_received", label: "Transcript received", side: "server" },
+  { key: "done", label: "Complete", side: "server" },
+];
+
+const trace = {
+  active: false,
+  startedAt: null,
+  totalBytes: 0,
+  fileCount: 0,
+  uploadedBytes: 0,
+  lastProgressAt: null,
+  stalled: false,
+  clientStages: [],
+  serverStages: [],
+  failure: null,
+  ticker: null,
+};
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value >= 1024 * 1024 * 1024) {
+    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+  if (value >= 1024) {
+    return `${(value / 1024).toFixed(0)} KB`;
+  }
+  return `${value} B`;
+}
+
+function formatDuration(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function beginTrace(totalBytes, fileCount) {
+  trace.active = true;
+  trace.startedAt = Date.now();
+  trace.totalBytes = totalBytes;
+  trace.fileCount = fileCount;
+  trace.uploadedBytes = 0;
+  trace.lastProgressAt = Date.now();
+  trace.stalled = false;
+  trace.clientStages = [{ stage: "uploading", at: new Date().toISOString() }];
+  trace.serverStages = [];
+  trace.failure = null;
+
+  // Reset the header too, or it keeps showing the previous job's outcome mid-upload.
+  elements.activityPanel.classList.remove("hidden");
+  elements.activityBadge.textContent = totalBytes > 0 ? "UPLOADING" : "SUBMITTING";
+  elements.activityBadge.classList.remove("success", "error", "pending");
+  elements.activityBadge.classList.add("pending");
+  elements.activityDetail.textContent =
+    totalBytes > 0
+      ? `Sending ${fileCount} file${fileCount === 1 ? "" : "s"} (${formatBytes(totalBytes)}) to Cloudflare.`
+      : "Submitting the job.";
+  elements.cancelJobButton.classList.add("hidden");
+  stopElapsedTimer();
+  state.elapsedAnchor = trace.startedAt;
+  updateElapsedDisplay();
+  state.elapsedTimer = window.setInterval(updateElapsedDisplay, 1000);
+
+  clearInterval(trace.ticker);
+  trace.ticker = window.setInterval(renderTrace, 1000);
+  renderTrace();
+}
+
+function markClientStage(stage, detail) {
+  trace.clientStages.push({ stage, at: new Date().toISOString(), detail });
+  renderTrace();
+}
+
+function failClientStage(message) {
+  trace.failure = message;
+  // Only Cloudflare's response proves the body arrived. The browser fires upload "load" once it
+  // has flushed to its own socket buffer, so a failed request invalidates any completion claim.
+  if (!trace.clientStages.some((entry) => entry.stage === "accepted")) {
+    trace.clientStages = trace.clientStages.filter((entry) => entry.stage !== "upload_complete");
+  }
+  clearInterval(trace.ticker);
+  trace.ticker = null;
+  renderTrace();
+}
+
+function endTrace() {
+  clearInterval(trace.ticker);
+  trace.ticker = null;
+}
+
+/**
+ * fetch() cannot report upload progress, so submissions go through XHR. On a slow connection
+ * this is the difference between a visible transfer and an unexplained wait.
+ */
+function uploadWithProgress(url, formData, totalBytes) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+
+    request.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+      trace.uploadedBytes = event.loaded;
+      trace.lastProgressAt = Date.now();
+      trace.stalled = false;
+      renderTrace();
+    });
+
+    // Completion comes from this event alone. A dropped socket makes Chromium emit a final
+    // progress event claiming loaded === total, so byte counts cannot prove the body arrived.
+    request.upload.addEventListener("load", () => {
+      trace.uploadedBytes = totalBytes;
+      trace.clientStages.push({
+        stage: "upload_complete",
+        at: new Date().toISOString(),
+        detail: "Waiting for Cloudflare to respond",
+      });
+      renderTrace();
+    });
+
+    request.addEventListener("load", () => {
+      let payload = {};
+      try {
+        payload = JSON.parse(request.responseText);
+      } catch {
+        /* fall through to the status check */
+      }
+      if (request.status >= 200 && request.status < 300) {
+        resolve(payload);
+        return;
+      }
+      if (request.status === 413) {
+        reject(new Error(`Cloudflare rejected the upload as too large (over ${formatBytes(MAX_UPLOAD_BYTES)}).`));
+        return;
+      }
+      reject(new Error(payload.detail || `Upload failed with status ${request.status}.`));
+    });
+
+    request.addEventListener("error", () =>
+      reject(new Error("The connection dropped during upload. Nothing was charged; try again."))
+    );
+    request.addEventListener("abort", () => reject(new Error("Upload cancelled.")));
+    request.addEventListener("timeout", () => reject(new Error("The upload timed out.")));
+
+    if (totalBytes === 0) {
+      trace.clientStages.push({ stage: "upload_complete", at: new Date().toISOString() });
+    }
+    request.send(formData);
+  });
+}
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => ({}));
@@ -396,6 +570,111 @@ function syncActivityClock(job) {
   if (!job.is_terminal && state.elapsedAnchor) {
     state.elapsedTimer = window.setInterval(updateElapsedDisplay, 1000);
   }
+}
+
+function uploadSummary() {
+  const { uploadedBytes, totalBytes, startedAt } = trace;
+  if (!totalBytes) {
+    return "No file to upload";
+  }
+
+  const percent = Math.min(100, Math.round((uploadedBytes / totalBytes) * 100));
+  const elapsed = Math.max(1, (Date.now() - startedAt) / 1000);
+  const rate = uploadedBytes / elapsed;
+  const parts = [`${percent}%`, `${formatBytes(uploadedBytes)} of ${formatBytes(totalBytes)}`];
+
+  if (rate > 0 && uploadedBytes < totalBytes) {
+    parts.push(`${formatBytes(rate)}/s`);
+    parts.push(`~${formatDuration(((totalBytes - uploadedBytes) / rate) * 1000)} left`);
+  }
+  return parts.join(" · ");
+}
+
+/** Merges the browser-observed stages with the server's into one ordered, timestamped list. */
+function renderTrace() {
+  if (!trace.active) {
+    elements.tracePanel.classList.add("hidden");
+    return;
+  }
+  elements.tracePanel.classList.remove("hidden");
+
+  const seen = new Map();
+  for (const entry of [...trace.clientStages, ...trace.serverStages]) {
+    if (!seen.has(entry.stage)) {
+      seen.set(entry.stage, entry);
+    }
+  }
+
+  const uploadStalled =
+    !seen.has("upload_complete") &&
+    trace.lastProgressAt &&
+    Date.now() - trace.lastProgressAt > STALL_AFTER_MS;
+
+  const steps = TRACE_STEPS.filter(
+    (step) => step.key !== "audio_stored" || trace.totalBytes > 0
+  ).filter((step) => step.key !== "audio_loaded" || trace.totalBytes > 0);
+
+  const failed = Boolean(trace.failure) || seen.has("failed");
+
+  // "uploading" is recorded when the transfer starts, so only upload_complete proves it finished.
+  const isComplete = (key) => (key === "uploading" ? seen.has("upload_complete") : seen.has(key));
+  const lastComplete = steps.reduce((last, step, index) => (isComplete(step.key) ? index : last), -1);
+  const currentIndex = lastComplete + 1;
+
+  elements.traceList.innerHTML = steps
+    .map((step, index) => {
+      const entry = seen.get(step.key);
+      let state = "pending";
+      let note = "";
+
+      if (isComplete(step.key)) {
+        state = "done";
+        const at = new Date(entry.at);
+        note = Number.isNaN(at.getTime()) ? "" : at.toLocaleTimeString();
+        if (entry?.detail) {
+          note = note ? `${note} · ${entry.detail}` : entry.detail;
+        }
+      } else if (index === currentIndex) {
+        state = failed ? "failed" : "active";
+        note = failed ? trace.failure || "Failed" : "";
+      } else if (index === currentIndex + 1 && !failed) {
+        state = "next";
+      }
+
+      if (step.key === "uploading") {
+        if (isComplete("uploading")) {
+          // Keep what the transfer actually cost: the point of a trace is finding the slow step.
+          const took = new Date(seen.get("upload_complete").at).getTime() - trace.startedAt;
+          if (trace.totalBytes > 0 && Number.isFinite(took)) {
+            const rate = trace.totalBytes / Math.max(1, took / 1000);
+            note = `${formatBytes(trace.totalBytes)} in ${formatDuration(took)} (${formatBytes(rate)}/s)`;
+          }
+        } else if (failed) {
+          note = trace.failure || "Failed";
+        } else {
+          state = uploadStalled ? "stalled" : "active";
+          note = uploadStalled
+            ? `No data sent for ${formatDuration(Date.now() - trace.lastProgressAt)} — the connection may have dropped`
+            : uploadSummary();
+        }
+      }
+
+      return `
+        <li class="trace-step trace-${state}">
+          <span class="trace-marker"></span>
+          <span class="trace-label">${escapeHtml(step.label)}</span>
+          <span class="trace-note">${escapeHtml(note)}</span>
+        </li>
+      `;
+    })
+    .join("");
+
+  const total = formatDuration(Date.now() - trace.startedAt);
+  elements.traceSummary.textContent = failed
+    ? `Stopped after ${total}`
+    : seen.has("done")
+      ? `Finished in ${total}`
+      : `Running for ${total}`;
 }
 
 function renderActivity(job) {
@@ -725,6 +1004,13 @@ function clearResults() {
 
 async function renderJob(job) {
   state.activeJobId = job.job_id;
+  if (trace.active && Array.isArray(job.stages)) {
+    trace.serverStages = job.stages;
+    if (job.is_terminal) {
+      endTrace();
+    }
+    renderTrace();
+  }
   renderHistory();
   try {
     await attachTranscriptData(job);
@@ -845,6 +1131,11 @@ async function renderJob(job) {
 }
 
 async function openJob(jobId) {
+  if (trace.active && jobId !== state.activeJobId) {
+    trace.active = false;
+    endTrace();
+    renderTrace();
+  }
   const job = await fetchJson(`/api/jobs/${jobId}`);
   await renderJob(job);
   if (job.is_terminal) {
@@ -1259,14 +1550,26 @@ elements.refreshUsageButton.addEventListener("click", async () => {
 
 elements.transcriptionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  setStatus(elements.formStatus, "Queueing transcription...");
+
+  const files = activeSourceMode() === "upload" ? [...elements.fileInput.files] : [];
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+
+  // Cloudflare rejects request bodies over 100 MB, so catch it before a long upload.
+  if (totalBytes > MAX_UPLOAD_BYTES) {
+    setStatus(
+      elements.formStatus,
+      `That is ${formatBytes(totalBytes)}, over the ${formatBytes(MAX_UPLOAD_BYTES)} limit Cloudflare accepts in one request. Upload fewer files at a time, or use an HTTPS URL instead.`,
+      "error"
+    );
+    return;
+  }
+
   elements.transcribeButton.disabled = true;
+  beginTrace(totalBytes, files.length);
 
   try {
-    const payload = await fetchJson("/api/transcriptions", {
-      method: "POST",
-      body: buildFormData(),
-    });
+    const payload = await uploadWithProgress("/api/transcriptions", buildFormData(), totalBytes);
+    markClientStage("accepted", "Cloudflare accepted the job");
     const queuedJobs = payload.jobs || [payload];
     const primaryJob = queuedJobs[0];
     renderJob(primaryJob);
@@ -1290,6 +1593,7 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
     }
   } catch (error) {
     elements.transcribeButton.disabled = false;
+    failClientStage(error.message);
     setStatus(elements.formStatus, error.message, "error");
   }
 });
