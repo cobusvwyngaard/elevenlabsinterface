@@ -8,11 +8,26 @@
   const EMPTY_TRANSCRIPT = "Transcript unavailable.";
 
   const CONTENT_TYPES = {
+    json: "application/json",
     txt: "text/plain;charset=utf-8",
     srt: "application/x-subrip",
     vtt: "text/vtt;charset=utf-8",
     html: "text/html;charset=utf-8",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    pdf: "application/pdf",
   };
+
+  const FORMAT_DESCRIPTIONS = {
+    json: "Raw transcript JSON",
+    txt: "Plain text",
+    srt: "SubRip subtitles",
+    vtt: "WebVTT subtitles",
+    html: "HTML document",
+    docx: "Word document",
+    pdf: "PDF document",
+  };
+
+  const SAVE_CANCELLED = Symbol("save cancelled");
 
   const loadedScripts = new Map();
 
@@ -41,6 +56,46 @@
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Opens a Save As dialog so the folder can be chosen.
+   *
+   * Must be called before the file contents are built: the picker needs the click's transient
+   * user activation, and awaiting a DOCX or PDF build first would spend it. Returns null where
+   * the API is unavailable (Firefox and Safari), leaving the plain download as the fallback.
+   */
+  async function pickSaveLocation(filename, format) {
+    if (typeof window.showSaveFilePicker !== "function") {
+      return null;
+    }
+
+    const mime = CONTENT_TYPES[format] || "application/octet-stream";
+    try {
+      return await window.showSaveFilePicker({
+        suggestedName: filename,
+        // A stable id makes Chromium reopen the folder used last time.
+        id: "workbench_transcripts",
+        types: [
+          {
+            description: FORMAT_DESCRIPTIONS[format] || "File",
+            accept: { [mime]: [`.${format}`] },
+          },
+        ],
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        return SAVE_CANCELLED;
+      }
+      // Any other picker failure falls back rather than losing the export.
+      return null;
+    }
+  }
+
+  async function writeTo(handle, blob) {
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
   }
 
   function escapeHtml(value) {
@@ -225,16 +280,12 @@ ${body}
     { format: "pdf", label: "PDF", extension: "pdf" },
   ];
 
-  async function download(format, response, speakerNames, metadata, stem) {
-    const filename = `${stem}.${format}`;
-
+  async function buildBlob(format, response, speakerNames, metadata) {
     if (format === "docx") {
-      saveBlob(await buildDocx(response, speakerNames, metadata), filename);
-      return;
+      return buildDocx(response, speakerNames, metadata);
     }
     if (format === "pdf") {
-      saveBlob(await buildPdf(response, speakerNames, metadata), filename);
-      return;
+      return buildPdf(response, speakerNames, metadata);
     }
 
     const builders = { txt: buildTxt, srt: buildSrt, vtt: buildVtt };
@@ -242,8 +293,44 @@ ${body}
       format === "html"
         ? buildHtml(response, speakerNames, metadata)
         : builders[format](response, speakerNames);
-    saveBlob(new Blob([text], { type: CONTENT_TYPES[format] }), filename);
+    return new Blob([text], { type: CONTENT_TYPES[format] });
   }
 
-  global.Exporters = { FORMATS, download };
+  async function download(format, response, speakerNames, metadata, stem) {
+    const filename = `${stem}.${format}`;
+
+    const target = await pickSaveLocation(filename, format);
+    if (target === SAVE_CANCELLED) {
+      return;
+    }
+
+    const blob = await buildBlob(format, response, speakerNames, metadata);
+    if (target) {
+      await writeTo(target, blob);
+      return;
+    }
+    saveBlob(blob, filename);
+  }
+
+  /** Saves the stored ElevenLabs response byte for byte, rather than a re-serialised copy. */
+  async function downloadRaw(url, filename) {
+    const target = await pickSaveLocation(filename, "json");
+    if (target === SAVE_CANCELLED) {
+      return;
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error("Could not load the stored transcript.");
+    }
+    const blob = await response.blob();
+
+    if (target) {
+      await writeTo(target, blob);
+      return;
+    }
+    saveBlob(blob, filename);
+  }
+
+  global.Exporters = { FORMATS, download, downloadRaw };
 })(window);

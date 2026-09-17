@@ -799,34 +799,39 @@ function renderExportControls(target, job, named) {
     return;
   }
 
-  if (!named) {
-    const raw = document.createElement("a");
-    raw.className = "download-link";
-    raw.href = job.transcript_url;
-    raw.textContent = "Raw JSON";
-    target.appendChild(raw);
-  }
-
   const speakerNames = named ? job.speaker_name_map || {} : null;
   const stem = named ? "named-transcript" : "transcript";
 
-  for (const definition of window.Exporters.FORMATS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "download-link";
-    button.textContent = named ? `Named ${definition.label}` : definition.label;
-    button.addEventListener("click", async () => {
-      const original = button.textContent;
-      button.disabled = true;
-      button.textContent = "Building...";
-      try {
-        await window.Exporters.download(
+  // Every control is a button so the save location can be chosen; a plain link would go
+  // straight to the download folder.
+  const definitions = [
+    ...(named
+      ? []
+      : [{ label: "Raw JSON", run: () => window.Exporters.downloadRaw(job.transcript_url, `${stem}.json`) }]),
+    ...window.Exporters.FORMATS.map((definition) => ({
+      label: named ? `Named ${definition.label}` : definition.label,
+      run: () =>
+        window.Exporters.download(
           definition.format,
           job.transcript_response,
           speakerNames,
           job.export_metadata || {},
           stem
-        );
+        ),
+    })),
+  ];
+
+  for (const definition of definitions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "download-link";
+    button.textContent = definition.label;
+    button.addEventListener("click", async () => {
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Saving...";
+      try {
+        await definition.run();
       } catch (error) {
         setStatus(elements.formStatus, error.message || "Could not build that export.", "error");
       } finally {
