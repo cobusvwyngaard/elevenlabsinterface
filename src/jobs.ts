@@ -8,13 +8,17 @@ import {
 import type { JobRepository } from "./db";
 import { ElevenLabsAPIError, ElevenLabsClient } from "./elevenlabsClient";
 import { scanTranscriptMetadata } from "./responseScan";
+import { signAudioUrl } from "./signing";
 import { isHidden, isTerminal, serializeDetail } from "./serialization";
-import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames, uploadKey as makeUploadKey } from "./storage";
+import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames } from "./storage";
 import { buildApiFields, effectiveSettings, submissionDefaults } from "./transcription";
 import type { Env, JobRecord, TranscriptionSubmission } from "./types";
 
 /** A job still non-terminal past this is unrecoverable: no consumer invocation lives that long. */
 const STALE_JOB_MINUTES = 20;
+
+/** Long enough for ElevenLabs to pull a large file, short enough to limit exposure. */
+const AUDIO_URL_TTL_SECONDS = 2 * 60 * 60;
 
 export interface BatchInfo {
   batchId?: string;
@@ -51,7 +55,8 @@ export class JobService {
 
   async queueSubmission(
     submission: TranscriptionSubmission,
-    fileBody: ArrayBuffer | null,
+    upload: { key: string; size: number } | null,
+    origin: string,
     batch: BatchInfo = {}
   ): Promise<JobRecord> {
     const jobId = crypto.randomUUID();
@@ -63,15 +68,15 @@ export class JobService {
       settings.batch_count = batch.batchCount;
     }
 
+    // The audio is already in R2: the browser put it there in parts, because it cannot fit in
+    // a single request and must never be held in the Worker's memory.
     let uploadKey: string | undefined;
-    if (submission.source_mode === "upload" && fileBody) {
-      uploadKey = makeUploadKey(jobId, submission.file_name ?? "audio");
-      await this.env.TRANSCRIPTS.put(uploadKey, fileBody, {
-        httpMetadata: { contentType: submission.file_content_type ?? "application/octet-stream" },
-      });
+    if (submission.source_mode === "upload" && upload) {
+      uploadKey = upload.key;
       settings.upload_key = uploadKey;
-      settings.upload_bytes = fileBody.byteLength;
+      settings.upload_bytes = upload.size;
     }
+    settings.origin = origin;
 
     const record: JobRecord = {
       job_id: jobId,
@@ -94,7 +99,7 @@ export class JobService {
     };
 
     if (uploadKey) {
-      addStage(record, "audio_stored", `${(fileBody!.byteLength / 1024 / 1024).toFixed(1)} MB received`);
+      addStage(record, "audio_stored", `${(upload!.size / 1024 / 1024).toFixed(1)} MB received`);
     }
     addStage(record, "queued");
 
@@ -125,18 +130,25 @@ export class JobService {
     try {
       const fields = buildApiFields(this.submissionFromSettings(record));
 
-      let file: { name: string; type: string; body: ArrayBuffer } | undefined;
-      if (record.source_type === "upload" && settings.upload_key) {
-        const object = await this.env.TRANSCRIPTS.get(settings.upload_key);
-        if (!object) {
+      if (record.source_type === "upload") {
+        if (!settings.upload_key) {
           throw new Error("The uploaded audio is no longer available. Start the job again.");
         }
-        file = {
-          name: settings.upload_key.split("/").pop() ?? "audio",
-          type: object.httpMetadata?.contentType ?? "application/octet-stream",
-          body: await object.arrayBuffer(),
-        };
-        addStage(record, "audio_loaded", `${(file.body.byteLength / 1024 / 1024).toFixed(1)} MB`);
+        const head = await this.env.TRANSCRIPTS.head(settings.upload_key);
+        if (!head) {
+          throw new Error("The uploaded audio is no longer available. Start the job again.");
+        }
+
+        // ElevenLabs fetches the audio itself from a short-lived signed URL. Reading it here
+        // would exceed the Worker's memory on any long recording.
+        const origin = settings.origin ?? "";
+        const url = await signAudioUrl(this.repository, origin, jobId, AUDIO_URL_TTL_SECONDS);
+        const withoutUrl = fields.filter(([name]) => name !== "cloud_storage_url");
+        withoutUrl.push(["cloud_storage_url", url]);
+        fields.length = 0;
+        fields.push(...withoutUrl);
+
+        addStage(record, "audio_linked", `${(head.size / 1024 / 1024).toFixed(1)} MB ready for ElevenLabs`);
       }
 
       record.status_detail =
@@ -146,7 +158,6 @@ export class JobService {
 
       const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
-        file,
       });
 
       // Cancelled while the request was in flight: discard the result quietly.
@@ -198,6 +209,10 @@ export class JobService {
             : String(error);
       current.status_detail = "The transcription failed.";
       await this.repository.saveJob(current);
+
+      if (settings.upload_key) {
+        await this.env.TRANSCRIPTS.delete(settings.upload_key).catch(() => undefined);
+      }
     }
   }
 
@@ -258,6 +273,11 @@ export class JobService {
 
   async deleteLocalJobData(record: JobRecord): Promise<void> {
     await deleteJobObjects(this.env.TRANSCRIPTS, record.job_id);
+    // The uploaded audio sits under its own key, so the job-prefixed sweep would miss it.
+    const uploadKey = record.effective_settings?.upload_key;
+    if (uploadKey) {
+      await this.env.TRANSCRIPTS.delete(uploadKey).catch(() => undefined);
+    }
     await this.repository.deleteJob(record.job_id);
   }
 

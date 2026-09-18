@@ -71,6 +71,7 @@
     }
 
     const mime = CONTENT_TYPES[format] || "application/octet-stream";
+    const startedAt = Date.now();
     try {
       return await window.showSaveFilePicker({
         suggestedName: filename,
@@ -85,6 +86,12 @@
       });
     } catch (error) {
       if (error && error.name === "AbortError") {
+        // An AbortError this fast means no dialog was ever shown — the picker is blocked by
+        // policy or unavailable in this context. Nobody can dismiss a dialog in a few
+        // milliseconds, and treating that as a cancellation would leave a dead button.
+        if (Date.now() - startedAt < 250) {
+          return null;
+        }
         return SAVE_CANCELLED;
       }
       // Any other picker failure falls back rather than losing the export.

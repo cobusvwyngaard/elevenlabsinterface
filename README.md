@@ -20,17 +20,38 @@ The feature set is preserved; the platform mechanics are not, because they could
 | Frontend | Static assets in `public/`, served by the Workers Assets binding |
 | Job history | Cloudflare D1 (`jobs`, `app_meta` — `migrations/0001_init.sql`) |
 | Transcripts | Cloudflare R2, stored as the untouched ElevenLabs response |
+| Audio uploads | Cloudflare R2 via multipart upload, straight from the browser in 20 MB parts |
 | Background execution | Cloudflare Queues — the API enqueues, a consumer runs the job |
 | Transcript shaping | The browser (`public/transcript-utils.js`) |
 | Exports (all six formats) | The browser (`public/exporters.js`), DOCX/PDF via vendored `docx` and `pdf-lib` |
 | API key storage | D1 (`app_meta`), behind Cloudflare Access |
 
-Request flow: `POST /api/transcriptions` validates the form, stores the upload in R2, writes a
-`queued` row to D1, and enqueues a message. The Queue consumer calls ElevenLabs and copies the
-response bytes straight into R2 without parsing them. The browser polls `GET /api/jobs/{id}`
-for status, and once a job succeeds it fetches the stored transcript **once** and derives
-everything locally — transcript text, timeline, audio events, entities, speaker profiles, and
-every export.
+Request flow: the browser uploads the audio to R2 first, in parts, then `POST
+/api/transcriptions` submits JSON referencing the stored object — the audio never travels with
+the job. The Queue consumer hands ElevenLabs a short-lived signed URL pointing back at
+`/audio/{job}` and copies the response bytes straight into R2 without parsing them. The browser
+polls `GET /api/jobs/{id}` for status, and once a job succeeds it fetches the stored transcript
+**once** and derives everything locally — transcript text, timeline, audio events, entities,
+speaker profiles, and every export.
+
+## Why the audio never passes through the Worker
+
+Cloudflare rejects any request body over **100 MB**, and a Worker isolate has only **128 MB of
+memory**. A one-hour recording breaks both: it cannot arrive in a single request, and it cannot
+be held in memory to forward on. So the audio is kept out of the Worker's hands entirely:
+
+1. The browser slices the file into 20 MB parts and sends each to `PUT /api/uploads/part`,
+   which streams it into an R2 multipart upload. Each request is far below the body limit, and
+   a part that fails is retried on its own rather than restarting the whole transfer.
+2. Job submission references the finished object by key, so it carries no audio at all.
+3. The consumer never reads the file. It signs a URL to `/audio/{job}` valid for two hours and
+   passes it as `cloud_storage_url`; ElevenLabs fetches the audio directly, and that route
+   streams the R2 body through without buffering.
+
+The ceiling is now ElevenLabs' own **2 GB** limit for URL-fetched audio, not Cloudflare's.
+
+The signing key is generated on first use and kept in `app_meta`, so this needs no manual
+secret. Requests without a valid, unexpired signature for that exact job are refused.
 
 ## Why the Worker does so little
 
@@ -97,7 +118,10 @@ so anyone who finds the URL could spend your credits. Put Cloudflare Access in f
    → **Self-hosted**.
 2. Set the application domain to your Worker's hostname.
 3. Add a policy: action **Allow**, rule **Emails** → your own email address.
-4. Save, then confirm that opening the app in a private window prompts for authentication.
+4. **Add a second policy: action Bypass, for the path `/audio/*`.** ElevenLabs fetches the
+   audio from that route and has no way to sign in; without the bypass it receives the login
+   page and every upload-mode job fails. The route is protected by its own signed URLs.
+5. Save, then confirm that opening the app in a private window prompts for authentication.
 
 This replaces the Windows Credential Manager decision in spec §2. There is no per-device
 encrypted secret store on Cloudflare; the protection is the Access gate, not the storage layer.
@@ -144,6 +168,9 @@ Behavioural differences worth knowing:
 - **Cancellation is checked, not signalled.** The API request and the Queue consumer run in
   separate isolates, so cancel writes `cancelled` to D1 and the consumer discards its result at
   the next checkpoint. A call already in flight still completes and still costs credits.
+- **Abandoned uploads are not swept up.** Audio is deleted once a job finishes or fails, and
+  when a job is deleted, but a file uploaded in a tab that is then closed before submitting
+  stays in R2. Add an R2 lifecycle rule expiring the `uploads/` prefix after a day to cover it.
 - **`transcription_id` comes from a bounded prefix scan.** If ElevenLabs ever returned it
   beyond the first 256 KB of the response, it would be missed, and the remote verify/delete
   features would report the job as having no stored id.

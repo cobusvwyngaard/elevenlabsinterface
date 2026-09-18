@@ -11,6 +11,8 @@ export interface JobMessage {
   /** R2 key holding the uploaded audio, for upload-mode jobs. */
   upload_key?: string;
   upload_bytes?: number;
+  /** Absolute origin captured at submission, so the consumer can sign an audio URL. */
+  origin?: string;
 }
 
 export interface TranscriptionSubmission {
@@ -75,6 +77,8 @@ export interface EffectiveSettings {
 
   upload_key?: string;
   upload_bytes?: number;
+  /** Absolute origin captured at submission, so the consumer can sign an audio URL. */
+  origin?: string;
   cloud_storage_url?: string | null;
   [key: string]: unknown;
 }

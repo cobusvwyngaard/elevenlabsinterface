@@ -3,10 +3,12 @@ import { HTTPException } from "hono/http-exception";
 import { JobRepository } from "./db";
 import { JobService } from "./jobs";
 import { KeyStore } from "./keyStore";
+import { audioRoutes } from "./routes/audio";
 import { downloadRoutes } from "./routes/downloads";
 import { jobRoutes } from "./routes/jobs";
 import { settingsRoutes } from "./routes/settings";
 import { transcriptionRoutes } from "./routes/transcriptions";
+import { uploadRoutes } from "./routes/uploads";
 import type { AppContext } from "./routes/deps";
 import type { Env, JobMessage } from "./types";
 
@@ -15,6 +17,8 @@ const app = new Hono<AppContext>();
 app.get("/healthz", (c) => c.json({ status: "ok" }));
 
 app.route("/", settingsRoutes);
+app.route("/", uploadRoutes);
+app.route("/", audioRoutes);
 app.route("/", transcriptionRoutes);
 app.route("/", jobRoutes);
 app.route("/", downloadRoutes);

@@ -7,50 +7,68 @@ import { httpError, requireApiKey, services, translateError, type AppContext } f
 
 export const transcriptionRoutes = new Hono<AppContext>();
 
-function stringField(form: FormData, name: string): string | undefined {
-  const value = form.get(name);
-  return typeof value === "string" ? value : undefined;
+interface UploadRef {
+  key: string;
+  filename: string;
+  content_type?: string;
+  size: number;
 }
 
-function stringList(form: FormData, name: string): string[] {
-  return form.getAll(name).filter((value): value is string => typeof value === "string");
-}
-
+/**
+ * The audio never arrives here. The browser uploads it to R2 in parts first and this request
+ * only references the stored object, so job submission stays far below the 100 MB body limit.
+ */
 transcriptionRoutes.post("/api/transcriptions", async (c) => {
   const { keyStore, service } = services(c);
   await requireApiKey(keyStore, "starting a transcription");
 
-  const form = await c.req.formData();
+  const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+  if (!body) {
+    throw httpError(400, "Could not read the submission.");
+  }
+
+  const text = (name: string): string | undefined => {
+    const value = body[name];
+    return typeof value === "string" ? value : undefined;
+  };
+  const list = (name: string): string[] => {
+    const value = body[name];
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  };
+
   const payload: SubmissionPayload = {
-    source_mode: stringField(form, "source_mode"),
-    model_id: stringField(form, "model_id"),
-    language_code: stringField(form, "language_code"),
-    audio_type: stringField(form, "audio_type"),
-    timestamps_granularity: stringField(form, "timestamps_granularity"),
-    diarize: stringField(form, "diarize"),
-    tag_audio_events: stringField(form, "tag_audio_events"),
-    use_multi_channel: stringField(form, "use_multi_channel"),
-    no_verbatim: stringField(form, "no_verbatim"),
-    zero_retention: stringField(form, "zero_retention"),
-    num_speakers: stringField(form, "num_speakers"),
-    diarization_threshold: stringField(form, "diarization_threshold"),
-    keyterms: stringField(form, "keyterms"),
-    entity_detection: stringList(form, "entity_detection"),
-    entity_detection_custom: stringField(form, "entity_detection_custom"),
+    source_mode: text("source_mode"),
+    model_id: text("model_id"),
+    language_code: text("language_code"),
+    audio_type: text("audio_type"),
+    timestamps_granularity: text("timestamps_granularity"),
+    diarize: text("diarize"),
+    tag_audio_events: text("tag_audio_events"),
+    use_multi_channel: text("use_multi_channel"),
+    no_verbatim: text("no_verbatim"),
+    zero_retention: text("zero_retention"),
+    num_speakers: text("num_speakers"),
+    diarization_threshold: text("diarization_threshold"),
+    keyterms: text("keyterms"),
+    entity_detection: list("entity_detection"),
+    entity_detection_custom: text("entity_detection_custom"),
   };
 
   const sourceMode = payload.source_mode === "url" ? "url" : "upload";
-  const rawUrlField = stringField(form, "cloud_storage_url") ?? "";
-  const files = form.getAll("files").filter((value): value is File => value instanceof File && value.size > 0);
+  const rawUrlField = text("cloud_storage_url") ?? "";
+  const uploads = (Array.isArray(body.uploads) ? body.uploads : []).filter(
+    (item): item is UploadRef =>
+      Boolean(item) && typeof item === "object" && typeof (item as UploadRef).key === "string"
+  );
   const urls = rawUrlField
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
 
   // In upload mode the URL field is still passed through so "not both" validation can fire.
-  const items: { file?: File; url?: string }[] =
+  const items: { upload?: UploadRef; url?: string }[] =
     sourceMode === "upload"
-      ? files.map((file) => ({ file, url: rawUrlField.trim() || undefined }))
+      ? uploads.map((upload) => ({ upload, url: rawUrlField.trim() || undefined }))
       : urls.map((url) => ({ url }));
 
   if (items.length === 0) {
@@ -61,6 +79,7 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
   }
 
   const batchId = items.length > 1 ? crypto.randomUUID() : undefined;
+  const origin = new URL(c.req.url).origin;
   const details: Record<string, unknown>[] = [];
 
   for (const [index, item] of items.entries()) {
@@ -69,9 +88,9 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
       submission = buildSubmission(
         { ...payload, source_mode: sourceMode, cloud_storage_url: item.url },
         {
-          fileName: item.file?.name ?? null,
-          fileBytes: item.file?.size ?? null,
-          fileContentType: item.file?.type ?? null,
+          fileName: item.upload?.filename ?? null,
+          fileBytes: item.upload?.size ?? null,
+          fileContentType: item.upload?.content_type ?? null,
         }
       );
     } catch (error) {
@@ -81,12 +100,16 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
       throw translateError(error);
     }
 
-    const body = item.file ? await item.file.arrayBuffer() : null;
-    const record = await service.queueSubmission(submission, body, {
-      batchId,
-      batchIndex: batchId ? index + 1 : undefined,
-      batchCount: batchId ? items.length : undefined,
-    });
+    const record = await service.queueSubmission(
+      submission,
+      item.upload ? { key: item.upload.key, size: item.upload.size } : null,
+      origin,
+      {
+        batchId,
+        batchIndex: batchId ? index + 1 : undefined,
+        batchCount: batchId ? items.length : undefined,
+      }
+    );
     details.push(serializeDetail(record, {}, service.metadataFor(record)));
   }
 

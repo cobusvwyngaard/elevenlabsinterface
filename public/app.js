@@ -272,8 +272,11 @@ function syncControls() {
   elements.diarizationThresholdInput.disabled = multiChannel || !diarize || hasSpeakerCount;
 }
 
-// Cloudflare returns 413 above this, whatever the plan's other limits are.
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+// Cloudflare rejects any single request body over 100 MB, so audio goes to R2 in parts well
+// under that. ElevenLabs caps a URL-fetched file at 2 GB, which is the real ceiling now.
+const PART_SIZE = 20 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+const PART_RETRIES = 3;
 const STALL_AFTER_MS = 20000;
 
 // Ordered pipeline. Client stages are observed in the browser; server stages arrive on the
@@ -284,7 +287,7 @@ const TRACE_STEPS = [
   { key: "audio_stored", label: "Audio saved to storage", side: "server" },
   { key: "queued", label: "Queued for processing", side: "server" },
   { key: "picked_up", label: "Picked up by a worker", side: "server" },
-  { key: "audio_loaded", label: "Audio loaded from storage", side: "server" },
+  { key: "audio_linked", label: "Audio linked for ElevenLabs", side: "server" },
   { key: "sent_to_elevenlabs", label: "Sent to ElevenLabs", side: "server" },
   { key: "transcript_received", label: "Transcript received", side: "server" },
   { key: "done", label: "Complete", side: "server" },
@@ -300,6 +303,7 @@ const trace = {
   stalled: false,
   clientStages: [],
   serverStages: [],
+  retries: [],
   failure: null,
   ticker: null,
 };
@@ -337,6 +341,7 @@ function beginTrace(totalBytes, fileCount) {
   trace.stalled = false;
   trace.clientStages = [{ stage: "uploading", at: new Date().toISOString() }];
   trace.serverStages = [];
+  trace.retries = [];
   trace.failure = null;
 
   // Reset the header too, or it keeps showing the previous job's outcome mid-upload.
@@ -356,6 +361,11 @@ function beginTrace(totalBytes, fileCount) {
 
   clearInterval(trace.ticker);
   trace.ticker = window.setInterval(renderTrace, 1000);
+  renderTrace();
+}
+
+function markRetry(partNumber, attempt, message) {
+  trace.retries.push({ partNumber, attempt, message, at: Date.now() });
   renderTrace();
 }
 
@@ -382,33 +392,23 @@ function endTrace() {
 }
 
 /**
- * fetch() cannot report upload progress, so submissions go through XHR. On a slow connection
- * this is the difference between a visible transfer and an unexplained wait.
+ * Uploads one part of a file to R2 through the Worker.
+ *
+ * fetch() cannot report upload progress, so this goes through XHR: on a slow connection that
+ * is the difference between a visible transfer and an unexplained wait. `baseBytes` is what
+ * earlier parts already sent, so progress reads as one continuous transfer.
  */
-function uploadWithProgress(url, formData, totalBytes) {
+function uploadPart(url, blob, baseBytes) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open("POST", url);
+    request.open("PUT", url);
 
     request.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable) {
         return;
       }
-      trace.uploadedBytes = event.loaded;
+      trace.uploadedBytes = baseBytes + event.loaded;
       trace.lastProgressAt = Date.now();
-      trace.stalled = false;
-      renderTrace();
-    });
-
-    // Completion comes from this event alone. A dropped socket makes Chromium emit a final
-    // progress event claiming loaded === total, so byte counts cannot prove the body arrived.
-    request.upload.addEventListener("load", () => {
-      trace.uploadedBytes = totalBytes;
-      trace.clientStages.push({
-        stage: "upload_complete",
-        at: new Date().toISOString(),
-        detail: "Waiting for Cloudflare to respond",
-      });
       renderTrace();
     });
 
@@ -420,27 +420,95 @@ function uploadWithProgress(url, formData, totalBytes) {
         /* fall through to the status check */
       }
       if (request.status >= 200 && request.status < 300) {
+        trace.uploadedBytes = baseBytes + blob.size;
         resolve(payload);
-        return;
-      }
-      if (request.status === 413) {
-        reject(new Error(`Cloudflare rejected the upload as too large (over ${formatBytes(MAX_UPLOAD_BYTES)}).`));
         return;
       }
       reject(new Error(payload.detail || `Upload failed with status ${request.status}.`));
     });
 
     request.addEventListener("error", () =>
-      reject(new Error("The connection dropped during upload. Nothing was charged; try again."))
+      reject(new Error("The connection dropped during upload."))
     );
     request.addEventListener("abort", () => reject(new Error("Upload cancelled.")));
     request.addEventListener("timeout", () => reject(new Error("The upload timed out.")));
 
-    if (totalBytes === 0) {
-      trace.clientStages.push({ stage: "upload_complete", at: new Date().toISOString() });
-    }
-    request.send(formData);
+    request.send(blob);
   });
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Sends a file to R2 in parts, retrying an individual part rather than the whole transfer.
+ * On a slow or flaky link, losing 20 MB to a blip is recoverable; losing an hour is not.
+ */
+async function uploadFileInParts(file) {
+  const created = await fetchJson("/api/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: file.name }),
+  });
+
+  const partSize = created.part_size || PART_SIZE;
+  const parts = [];
+  let uploaded = 0;
+
+  try {
+    for (let offset = 0, number = 1; offset < file.size; offset += partSize, number += 1) {
+      const blob = file.slice(offset, Math.min(offset + partSize, file.size));
+      const query = new URLSearchParams({
+        key: created.key,
+        upload_id: created.upload_id,
+        part_number: String(number),
+      });
+
+      let lastError = null;
+      for (let attempt = 1; attempt <= PART_RETRIES; attempt += 1) {
+        try {
+          const result = await uploadPart(`/api/uploads/part?${query}`, blob, uploaded);
+          parts.push({ part_number: result.part_number, etag: result.etag });
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          trace.uploadedBytes = uploaded;
+          if (attempt < PART_RETRIES) {
+            markRetry(number, attempt, error.message);
+            await wait(1000 * attempt);
+          }
+        }
+      }
+      if (lastError) {
+        throw lastError;
+      }
+
+      uploaded += blob.size;
+      trace.uploadedBytes = uploaded;
+      renderTrace();
+    }
+
+    const completed = await fetchJson("/api/uploads/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: created.key, upload_id: created.upload_id, parts }),
+    });
+
+    return {
+      key: created.key,
+      filename: file.name,
+      content_type: file.type || "application/octet-stream",
+      size: completed.size ?? file.size,
+    };
+  } catch (error) {
+    // Leaving a half-assembled upload behind would bill for storage nobody can reach.
+    await fetch("/api/uploads/abort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: created.key, upload_id: created.upload_id }),
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -612,7 +680,7 @@ function renderTrace() {
 
   const steps = TRACE_STEPS.filter(
     (step) => step.key !== "audio_stored" || trace.totalBytes > 0
-  ).filter((step) => step.key !== "audio_loaded" || trace.totalBytes > 0);
+  ).filter((step) => step.key !== "audio_linked" || trace.totalBytes > 0);
 
   const failed = Boolean(trace.failure) || seen.has("failed");
 
@@ -653,9 +721,14 @@ function renderTrace() {
           note = trace.failure || "Failed";
         } else {
           state = uploadStalled ? "stalled" : "active";
+          const recentRetry = trace.retries[trace.retries.length - 1];
+          const retryNote =
+            recentRetry && Date.now() - recentRetry.at < 15000
+              ? ` · retrying part ${recentRetry.partNumber} (attempt ${recentRetry.attempt + 1})`
+              : "";
           note = uploadStalled
             ? `No data sent for ${formatDuration(Date.now() - trace.lastProgressAt)} — the connection may have dropped`
-            : uploadSummary();
+            : uploadSummary() + retryNote;
         }
       }
 
@@ -1302,33 +1375,27 @@ async function auditRemoteJobs() {
   }
 }
 
-function buildFormData() {
-  const data = new FormData();
+function buildSubmission(uploads) {
   const mode = activeSourceMode();
-  data.append("source_mode", mode);
-  if (mode === "upload" && elements.fileInput.files.length) {
-    [...elements.fileInput.files].forEach((file) => {
-      data.append("files", file);
-    });
-  }
-  if (mode === "url") {
-    data.append("cloud_storage_url", elements.urlInput.value.trim());
-  }
-  data.append("model_id", elements.modelSelect.value);
-  data.append("language_code", elements.languageInput.value.trim());
-  data.append("audio_type", elements.audioTypeSelect.value);
-  data.append("timestamps_granularity", elements.timestampsSelect.value);
-  data.append("diarize", elements.diarizeInput.checked ? "true" : "false");
-  data.append("tag_audio_events", elements.tagAudioEventsInput.checked ? "true" : "false");
-  data.append("use_multi_channel", elements.multiChannelInput.checked ? "true" : "false");
-  data.append("no_verbatim", elements.noVerbatimInput.checked ? "true" : "false");
-  data.append("zero_retention", elements.zeroRetentionInput.checked ? "true" : "false");
-  data.append("num_speakers", elements.numSpeakersInput.value.trim());
-  data.append("diarization_threshold", elements.diarizationThresholdInput.value.trim());
-  data.append("keyterms", elements.keytermsInput.value.trim());
-  data.append("entity_detection_custom", elements.entityDetectionCustomInput.value.trim());
-  selectedEntityDetection().forEach((value) => data.append("entity_detection", value));
-  return data;
+  return {
+    source_mode: mode,
+    uploads: mode === "upload" ? uploads : [],
+    cloud_storage_url: mode === "url" ? elements.urlInput.value.trim() : "",
+    model_id: elements.modelSelect.value,
+    language_code: elements.languageInput.value.trim(),
+    audio_type: elements.audioTypeSelect.value,
+    timestamps_granularity: elements.timestampsSelect.value,
+    diarize: elements.diarizeInput.checked ? "true" : "false",
+    tag_audio_events: elements.tagAudioEventsInput.checked ? "true" : "false",
+    use_multi_channel: elements.multiChannelInput.checked ? "true" : "false",
+    no_verbatim: elements.noVerbatimInput.checked ? "true" : "false",
+    zero_retention: elements.zeroRetentionInput.checked ? "true" : "false",
+    num_speakers: elements.numSpeakersInput.value.trim(),
+    diarization_threshold: elements.diarizationThresholdInput.value.trim(),
+    keyterms: elements.keytermsInput.value.trim(),
+    entity_detection_custom: elements.entityDetectionCustomInput.value.trim(),
+    entity_detection: selectedEntityDetection(),
+  };
 }
 
 async function pollJobOnce(jobId) {
@@ -1559,11 +1626,11 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   const files = activeSourceMode() === "upload" ? [...elements.fileInput.files] : [];
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
 
-  // Cloudflare rejects request bodies over 100 MB, so catch it before a long upload.
-  if (totalBytes > MAX_UPLOAD_BYTES) {
+  const oversized = files.find((file) => file.size > MAX_UPLOAD_BYTES);
+  if (oversized) {
     setStatus(
       elements.formStatus,
-      `That is ${formatBytes(totalBytes)}, over the ${formatBytes(MAX_UPLOAD_BYTES)} limit Cloudflare accepts in one request. Upload fewer files at a time, or use an HTTPS URL instead.`,
+      `${oversized.name} is ${formatBytes(oversized.size)}. ElevenLabs accepts up to ${formatBytes(MAX_UPLOAD_BYTES)} per file.`,
       "error"
     );
     return;
@@ -1573,7 +1640,20 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   beginTrace(totalBytes, files.length);
 
   try {
-    const payload = await uploadWithProgress("/api/transcriptions", buildFormData(), totalBytes);
+    // The audio goes to R2 first, in parts, so no single request carries the whole file.
+    const uploads = [];
+    for (const file of files) {
+      uploads.push(await uploadFileInParts(file));
+    }
+    if (files.length) {
+      markClientStage("upload_complete", "Stored on Cloudflare");
+    }
+
+    const payload = await fetchJson("/api/transcriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSubmission(uploads)),
+    });
     markClientStage("accepted", "Cloudflare accepted the job");
     const queuedJobs = payload.jobs || [payload];
     const primaryJob = queuedJobs[0];
