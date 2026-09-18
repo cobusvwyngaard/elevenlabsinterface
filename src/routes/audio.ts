@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { verifyAudioUrl } from "../signing";
 import { httpError, services, type AppContext } from "./deps";
 
@@ -14,9 +14,9 @@ export const audioRoutes = new Hono<AppContext>();
  * NOTE: if Cloudflare Access is enabled on this Worker, /audio/* needs a Bypass policy or
  * ElevenLabs will be served the login page instead of the audio.
  */
-audioRoutes.get("/audio/:job_id", async (c) => {
+async function serveAudio(c: Context<AppContext>) {
   const { repository } = services(c);
-  const jobId = c.req.param("job_id");
+  const jobId = c.req.param("job_id") ?? "";
 
   const valid = await verifyAudioUrl(
     repository,
@@ -59,4 +59,8 @@ audioRoutes.get("/audio/:job_id", async (c) => {
 
   headers.set("content-length", String(object.size));
   return new Response(object.body, { headers });
-});
+}
+
+audioRoutes.get("/audio/:job_id", serveAudio);
+// The filename segment is what gives the URL its extension.
+audioRoutes.get("/audio/:job_id/:filename", serveAudio);

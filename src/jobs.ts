@@ -142,7 +142,8 @@ export class JobService {
         // ElevenLabs fetches the audio itself from a short-lived signed URL. Reading it here
         // would exceed the Worker's memory on any long recording.
         const origin = settings.origin ?? "";
-        const url = await signAudioUrl(this.repository, origin, jobId, AUDIO_URL_TTL_SECONDS);
+        const filename = settings.upload_key.split("/").pop();
+        const url = await signAudioUrl(this.repository, origin, jobId, AUDIO_URL_TTL_SECONDS, filename);
         const withoutUrl = fields.filter(([name]) => name !== "cloud_storage_url");
         withoutUrl.push(["cloud_storage_url", url]);
         fields.length = 0;

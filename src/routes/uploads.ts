@@ -17,11 +17,48 @@ function sanitizeName(name: string): string {
   return (name || "audio").replace(/[^A-Za-z0-9._-]/g, "_").slice(-120);
 }
 
-uploadRoutes.post("/api/uploads", async (c) => {
-  const body = await c.req.json<{ filename?: string }>().catch(() => ({}) as { filename?: string });
-  const key = `${UPLOAD_PREFIX}/${crypto.randomUUID()}/${sanitizeName(body.filename ?? "audio")}`;
+const EXTENSION_TYPES: Record<string, string> = {
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  mp4: "video/mp4",
+  wav: "audio/wav",
+  flac: "audio/flac",
+  ogg: "audio/ogg",
+  oga: "audio/ogg",
+  opus: "audio/opus",
+  webm: "video/webm",
+  aac: "audio/aac",
+  aiff: "audio/aiff",
+  aif: "audio/aiff",
+  wma: "audio/x-ms-wma",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  amr: "audio/amr",
+  "3gp": "video/3gpp",
+};
 
-  const upload = await c.env.TRANSCRIPTS.createMultipartUpload(key);
+/** Browsers leave the type blank for some formats, so the extension is the fallback. */
+export function contentTypeFor(filename: string, provided?: string): string {
+  if (provided && provided !== "application/octet-stream") {
+    return provided;
+  }
+  const extension = filename.split(".").pop()?.toLowerCase() ?? "";
+  return EXTENSION_TYPES[extension] ?? "audio/mpeg";
+}
+
+uploadRoutes.post("/api/uploads", async (c) => {
+  const body = await c.req
+    .json<{ filename?: string; content_type?: string }>()
+    .catch(() => ({}) as { filename?: string; content_type?: string });
+
+  const filename = sanitizeName(body.filename ?? "audio");
+  const key = `${UPLOAD_PREFIX}/${crypto.randomUUID()}/${filename}`;
+
+  // The content type has to be stored here. ElevenLabs fetches this object by URL and rejects
+  // it unless the response identifies itself as audio or video.
+  const upload = await c.env.TRANSCRIPTS.createMultipartUpload(key, {
+    httpMetadata: { contentType: contentTypeFor(filename, body.content_type) },
+  });
   return c.json({ key, upload_id: upload.uploadId, part_size: PART_SIZE });
 });
 

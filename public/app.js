@@ -447,7 +447,7 @@ async function uploadFileInParts(file) {
   const created = await fetchJson("/api/uploads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ filename: file.name }),
+    body: JSON.stringify({ filename: file.name, content_type: file.type }),
   });
 
   const partSize = created.part_size || PART_SIZE;

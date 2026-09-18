@@ -37,12 +37,17 @@ export async function signAudioUrl(
   repository: JobRepository,
   origin: string,
   jobId: string,
-  ttlSeconds: number
+  ttlSeconds: number,
+  filename?: string
 ): Promise<string> {
   const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
   const secret = await signingKey(repository);
   const signature = await sign(secret, `${jobId}:${expires}`);
-  return `${origin}/audio/${jobId}?expires=${expires}&signature=${signature}`;
+
+  // The filename is cosmetic and unsigned, but it gives the URL an extension. ElevenLabs uses
+  // it alongside the content type to decide whether the target is audio it can handle.
+  const suffix = filename ? `/${encodeURIComponent(filename)}` : "";
+  return `${origin}/audio/${jobId}${suffix}?expires=${expires}&signature=${signature}`;
 }
 
 export async function verifyAudioUrl(
