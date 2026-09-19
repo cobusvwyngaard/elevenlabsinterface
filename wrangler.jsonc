@@ -49,6 +49,15 @@
         "max_retries": 1,
         "max_concurrency": 10,
         "dead_letter_queue": "transcription-jobs-dlq"
+      },
+      // A job whose consumer is killed outright writes nothing, so without this the record sits
+      // "running" until a sweep gives up on it twenty minutes later and blames an interruption it
+      // cannot describe. Every attempt lands here once the retries are spent.
+      {
+        "queue": "transcription-jobs-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 0
       }
     ]
   }

@@ -10,6 +10,14 @@ on:
       - claude/elevenlabs-cloudflare-rebuild-lcbxi4
   workflow_dispatch:
 
+# The same commit is pushed to both branches above, so two runs start seconds apart.
+# Without this they both read d1_migrations before either has written to it, both decide
+# the same migrations are unapplied, and the loser dies on a UNIQUE constraint. Queued
+# rather than cancelled: cancel-in-progress would kill a run in the middle of a migration.
+concurrency:
+  group: deploy-cloudflare
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
