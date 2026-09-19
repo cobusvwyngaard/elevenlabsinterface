@@ -25,6 +25,12 @@ jobs:
 
       - run: npx tsc --noEmit
 
+      # Before the deploy, so code is never live against a schema it expects but does not have.
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: d1 migrations apply workbench --remote
+
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
