@@ -52,6 +52,8 @@ const elements = {
   auditRemoteButton: document.getElementById("auditRemoteButton"),
   resultsPanel: document.getElementById("resultsPanel"),
   resultsEmptyState: document.getElementById("resultsEmptyState"),
+  resultsEmptyTitle: document.getElementById("resultsEmptyTitle"),
+  resultsEmptyBody: document.getElementById("resultsEmptyBody"),
   resultMeta: document.getElementById("resultMeta"),
   deletePanel: document.getElementById("deletePanel"),
   deleteHelpText: document.getElementById("deleteHelpText"),
@@ -344,7 +346,12 @@ function beginTrace(totalBytes, fileCount) {
   trace.retries = [];
   trace.failure = null;
 
-  // Reset the header too, or it keeps showing the previous job's outcome mid-upload.
+  // Reset the header and status line too, or they keep showing the previous job's outcome
+  // while this one is still uploading.
+  setStatus(
+    elements.formStatus,
+    totalBytes > 0 ? "Uploading to Cloudflare..." : "Submitting the job..."
+  );
   elements.activityPanel.classList.remove("hidden");
   elements.activityBadge.textContent = totalBytes > 0 ? "UPLOADING" : "SUBMITTING";
   elements.activityBadge.classList.remove("success", "error", "pending");
@@ -1053,12 +1060,21 @@ function renderHistory() {
   });
 }
 
-function clearResults() {
+function setResultsPlaceholder(title, body) {
+  elements.resultsEmptyTitle.textContent = title;
+  elements.resultsEmptyBody.textContent = body;
+}
+
+function clearResults({ title, body } = {}) {
   state.activeJobId = null;
   renderHistory();
   renderActivity(null);
   elements.resultsPanel.classList.add("hidden");
   elements.resultsEmptyState.classList.remove("hidden");
+  setResultsPlaceholder(
+    title ?? "No transcript loaded",
+    body ?? "Run a transcription or reopen one from history to see the transcript, exports, and timecoded entries."
+  );
   elements.resultMeta.textContent = "";
   elements.metadataGrid.innerHTML = "";
   elements.downloads.innerHTML = "";
@@ -1637,6 +1653,11 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   }
 
   elements.transcribeButton.disabled = true;
+  // Clear before the trace starts: clearResults hides the activity panel that beginTrace shows.
+  clearResults({
+    title: "Starting a new transcription",
+    body: "The transcript will appear here once this job finishes. Progress is shown under the button above.",
+  });
   beginTrace(totalBytes, files.length);
 
   try {
