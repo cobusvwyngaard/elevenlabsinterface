@@ -28,8 +28,8 @@ The feature set is preserved; the platform mechanics are not, because they could
 
 Request flow: the browser uploads the audio to R2 first, in parts, then `POST
 /api/transcriptions` submits JSON referencing the stored object — the audio never travels with
-the job. The Queue consumer hands ElevenLabs a short-lived signed URL pointing back at
-`/audio/{job}` and copies the response bytes straight into R2 without parsing them. The browser
+the job. The Queue consumer streams that object from R2 straight into the ElevenLabs request
+and copies the response bytes back into R2 without parsing them. The browser
 polls `GET /api/jobs/{id}` for status, and once a job succeeds it fetches the stored transcript
 **once** and derives everything locally — transcript text, timeline, audio events, entities,
 speaker profiles, and every export.
@@ -44,14 +44,20 @@ be held in memory to forward on. So the audio is kept out of the Worker's hands 
    which streams it into an R2 multipart upload. Each request is far below the body limit, and
    a part that fails is retried on its own rather than restarting the whole transfer.
 2. Job submission references the finished object by key, so it carries no audio at all.
-3. The consumer never reads the file. It signs a URL to `/audio/{job}` valid for two hours and
-   passes it as `cloud_storage_url`; ElevenLabs fetches the audio directly, and that route
-   streams the R2 body through without buffering.
+3. The consumer never holds the file. It streams the R2 object body straight into a
+   multipart request to ElevenLabs, built by hand in `src/elevenlabsClient.ts` because
+   `FormData` would materialise the whole file in memory.
 
-The ceiling is now ElevenLabs' own **2 GB** limit for URL-fetched audio, not Cloudflare's.
+The ceiling is now ElevenLabs' own **5 GB** limit for a direct upload, not Cloudflare's.
 
-The signing key is generated on first use and kept in `app_meta`, so this needs no manual
-secret. Requests without a valid, unexpired signature for that exact job are refused.
+An earlier version instead handed ElevenLabs a signed URL to fetch the audio from. That
+depended on ElevenLabs being able to reach back to this Worker, which failed in practice, so
+the file is now pushed rather than pulled. Nothing needs to reach in from outside.
+
+One workerd detail worth knowing if this is ever touched: a streaming body does not survive
+the Request being re-created. Passing an init as `fetch`'s second argument, or wrapping an
+existing Request, silently sends zero bytes. `send()` therefore builds the Request once, with
+the abort signal already in it, and hands it to `fetch` untouched.
 
 ## Why the Worker does so little
 
@@ -118,10 +124,10 @@ so anyone who finds the URL could spend your credits. Put Cloudflare Access in f
    → **Self-hosted**.
 2. Set the application domain to your Worker's hostname.
 3. Add a policy: action **Allow**, rule **Emails** → your own email address.
-4. **Add a second policy: action Bypass, for the path `/audio/*`.** ElevenLabs fetches the
-   audio from that route and has no way to sign in; without the bypass it receives the login
-   page and every upload-mode job fails. The route is protected by its own signed URLs.
-5. Save, then confirm that opening the app in a private window prompts for authentication.
+4. Save, then confirm that opening the app in a private window prompts for authentication.
+
+Nothing needs a bypass: the audio is pushed to ElevenLabs from inside the Worker, so no
+outside service ever has to reach a route here.
 
 This replaces the Windows Credential Manager decision in spec §2. There is no per-device
 encrypted secret store on Cloudflare; the protection is the Access gate, not the storage layer.

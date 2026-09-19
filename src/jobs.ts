@@ -8,7 +8,6 @@ import {
 import type { JobRepository } from "./db";
 import { ElevenLabsAPIError, ElevenLabsClient } from "./elevenlabsClient";
 import { scanTranscriptMetadata } from "./responseScan";
-import { signAudioUrl } from "./signing";
 import { isHidden, isTerminal, serializeDetail } from "./serialization";
 import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames } from "./storage";
 import { buildApiFields, effectiveSettings, submissionDefaults } from "./transcription";
@@ -16,9 +15,6 @@ import type { Env, JobRecord, TranscriptionSubmission } from "./types";
 
 /** A job still non-terminal past this is unrecoverable: no consumer invocation lives that long. */
 const STALE_JOB_MINUTES = 20;
-
-/** Long enough for ElevenLabs to pull a large file, short enough to limit exposure. */
-const AUDIO_URL_TTL_SECONDS = 2 * 60 * 60;
 
 export interface BatchInfo {
   batchId?: string;
@@ -130,35 +126,41 @@ export class JobService {
     try {
       const fields = buildApiFields(this.submissionFromSettings(record));
 
+      let file: { name: string; type: string; size: number; body: ReadableStream } | undefined;
+
       if (record.source_type === "upload") {
         if (!settings.upload_key) {
           throw new Error("The uploaded audio is no longer available. Start the job again.");
         }
-        const head = await this.env.TRANSCRIPTS.head(settings.upload_key);
-        if (!head) {
+        const object = await this.env.TRANSCRIPTS.get(settings.upload_key);
+        if (!object) {
           throw new Error("The uploaded audio is no longer available. Start the job again.");
         }
 
-        // ElevenLabs fetches the audio itself from a short-lived signed URL. Reading it here
-        // would exceed the Worker's memory on any long recording.
-        const origin = settings.origin ?? "";
-        const filename = settings.upload_key.split("/").pop();
-        const url = await signAudioUrl(this.repository, origin, jobId, AUDIO_URL_TTL_SECONDS, filename);
-        const withoutUrl = fields.filter(([name]) => name !== "cloud_storage_url");
-        withoutUrl.push(["cloud_storage_url", url]);
-        fields.length = 0;
-        fields.push(...withoutUrl);
-
-        addStage(record, "audio_linked", `${(head.size / 1024 / 1024).toFixed(1)} MB ready for ElevenLabs`);
+        // Streamed from R2 to ElevenLabs without ever being held here. Sending it directly also
+        // means the transfer does not depend on ElevenLabs being able to reach back to us.
+        file = {
+          name: settings.upload_key.split("/").pop() ?? "audio",
+          type: object.httpMetadata?.contentType ?? "audio/mpeg",
+          size: object.size,
+          body: object.body,
+        };
+        addStage(
+          record,
+          "audio_streaming",
+          `${(object.size / 1024 / 1024).toFixed(1)} MB as ${file.type}`
+        );
       }
 
-      record.status_detail =
-        "Sent to ElevenLabs. Waiting for the transcript — this job waits up to about 13 minutes.";
+      record.status_detail = file
+        ? "Streaming the audio to ElevenLabs and waiting for the transcript."
+        : "Sent to ElevenLabs. Waiting for the transcript — this job waits up to about 13 minutes.";
       addStage(record, "sent_to_elevenlabs");
       await this.repository.saveJob(record);
 
       const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
+        file,
       });
 
       // Cancelled while the request was in flight: discard the result quietly.
@@ -204,7 +206,7 @@ export class JobService {
       current.completed_at = nowIso();
       current.error_message =
         error instanceof ElevenLabsAPIError
-          ? error.message
+          ? `${error.message}${error.details ? ` [${JSON.stringify(error.details).slice(0, 400)}]` : ""}`
           : error instanceof Error
             ? error.message || error.name
             : String(error);

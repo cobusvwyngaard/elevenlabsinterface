@@ -287,7 +287,7 @@ const TRACE_STEPS = [
   { key: "audio_stored", label: "Audio saved to storage", side: "server" },
   { key: "queued", label: "Queued for processing", side: "server" },
   { key: "picked_up", label: "Picked up by a worker", side: "server" },
-  { key: "audio_linked", label: "Audio linked for ElevenLabs", side: "server" },
+  { key: "audio_streaming", label: "Streaming audio to ElevenLabs", side: "server" },
   { key: "sent_to_elevenlabs", label: "Sent to ElevenLabs", side: "server" },
   { key: "transcript_received", label: "Transcript received", side: "server" },
   { key: "done", label: "Complete", side: "server" },
@@ -680,7 +680,7 @@ function renderTrace() {
 
   const steps = TRACE_STEPS.filter(
     (step) => step.key !== "audio_stored" || trace.totalBytes > 0
-  ).filter((step) => step.key !== "audio_linked" || trace.totalBytes > 0);
+  ).filter((step) => step.key !== "audio_streaming" || trace.totalBytes > 0);
 
   const failed = Boolean(trace.failure) || seen.has("failed");
 

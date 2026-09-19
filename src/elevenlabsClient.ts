@@ -55,6 +55,59 @@ function extractMessage(payload: unknown, depth = 0): string | null {
   return null;
 }
 
+
+/**
+ * Assembles a multipart/form-data body that streams the audio rather than holding it.
+ *
+ * The exact length is computed up front so the request carries a Content-Length: a chunked
+ * upload of this size is far more likely to be refused by an upstream.
+ */
+function buildStreamingMultipart(
+  fields: [string, string][],
+  file: { name: string; type: string; size: number; body: ReadableStream }
+): { body: ReadableStream; contentType: string; contentLength: number } {
+  const boundary = `----workbench${crypto.randomUUID().replace(/-/g, "")}`;
+  const encoder = new TextEncoder();
+
+  let preambleText = "";
+  for (const [key, value] of fields) {
+    preambleText += `--${boundary}\r\n`;
+    preambleText += `Content-Disposition: form-data; name="${key}"\r\n\r\n`;
+    preambleText += `${value}\r\n`;
+  }
+  preambleText += `--${boundary}\r\n`;
+  preambleText += `Content-Disposition: form-data; name="file"; filename="${file.name.replace(/"/g, "")}"\r\n`;
+  preambleText += `Content-Type: ${file.type}\r\n\r\n`;
+
+  const preamble = encoder.encode(preambleText);
+  const epilogue = encoder.encode(`\r\n--${boundary}--\r\n`);
+
+  const reader = file.body.getReader();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(preamble);
+    },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        controller.enqueue(epilogue);
+        controller.close();
+        return;
+      }
+      controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+
+  return {
+    body,
+    contentType: `multipart/form-data; boundary=${boundary}`,
+    contentLength: preamble.byteLength + file.size + epilogue.byteLength,
+  };
+}
+
 export class ElevenLabsClient {
   private readonly apiUrl: string;
   /** Wall-clock ceiling per call. A Queue consumer invocation is capped anyway. */
@@ -71,7 +124,7 @@ export class ElevenLabsClient {
   }
 
   private async send(
-    request: Request,
+    makeRequest: (signal: AbortSignal) => Request,
     apiKey: string,
     phase: Phase,
     options: { timeoutMs?: number; timeoutNote?: string; signal?: AbortSignal } = {}
@@ -85,11 +138,15 @@ export class ElevenLabsClient {
       options.signal.addEventListener("abort", () => controller.abort(), { once: true });
     }
 
+    // The Request is built once, with the abort signal already in it, and handed to fetch
+    // untouched. Re-creating a Request, or passing an init as fetch's second argument, drops a
+    // streaming body: the audio arrived at ElevenLabs as zero bytes.
+    const request = makeRequest(controller.signal);
     request.headers.set("xi-api-key", apiKey);
     request.headers.set("accept", "application/json");
 
     try {
-      return await fetch(request, { signal: controller.signal });
+      return await fetch(request);
     } catch (error) {
       const elapsed = (Date.now() - startedAt) / 1000;
       if (controller.signal.aborted) {
@@ -126,33 +183,47 @@ export class ElevenLabsClient {
   async transcribe(
     apiKey: string,
     fields: [string, string][],
-    options: { enableLogging: boolean; file?: { name: string; type: string; body: ArrayBuffer }; signal?: AbortSignal }
+    options: {
+      enableLogging: boolean;
+      file?: { name: string; type: string; size: number; body: ReadableStream };
+      signal?: AbortSignal;
+    }
   ): Promise<ArrayBuffer> {
     const url = new URL(this.apiUrl);
     url.searchParams.set("enable_logging", options.enableLogging ? "true" : "false");
 
-    const form = new FormData();
-    for (const [key, value] of fields) {
-      form.append(key, value);
-    }
+    let makeRequest: (signal: AbortSignal) => Request;
     if (options.file) {
-      form.append("file", new File([options.file.body], options.file.name, { type: options.file.type }));
+      // Built by hand and streamed: FormData would need the whole file in memory, which a
+      // Worker cannot do. Sending it ourselves also means ElevenLabs never has to reach back
+      // to us for the audio.
+      const { body, contentType, contentLength } = buildStreamingMultipart(fields, options.file);
+      makeRequest = (signal) =>
+        new Request(url.toString(), {
+          method: "POST",
+          body,
+          headers: { "content-type": contentType, "content-length": String(contentLength) },
+          signal,
+          // Required whenever the body is a stream; without it the body is silently empty.
+          duplex: "half",
+        } as RequestInit & { duplex: "half" });
+    } else {
+      const form = new FormData();
+      for (const [key, value] of fields) {
+        form.append(key, value);
+      }
+      makeRequest = (signal) => new Request(url.toString(), { method: "POST", body: form, signal });
     }
 
     const phase: Phase = options.file
       ? "uploading the file to ElevenLabs"
       : "waiting for ElevenLabs to return the completed transcript";
 
-    const response = await this.send(
-      new Request(url.toString(), { method: "POST", body: form }),
-      apiKey,
-      phase,
-      {
-        timeoutNote:
-          "Do not simply retry: ElevenLabs may already have processed the audio and spent the credits.",
-        signal: options.signal,
-      }
-    );
+    const response = await this.send(makeRequest, apiKey, phase, {
+      timeoutNote:
+        "Do not simply retry: ElevenLabs may already have processed the audio and spent the credits.",
+      signal: options.signal,
+    });
 
     if (!response.ok) {
       // Error bodies are small, so parsing one costs nothing meaningful.
@@ -174,7 +245,7 @@ export class ElevenLabsClient {
 
   async getSubscription(apiKey: string): Promise<Record<string, unknown>> {
     const response = await this.send(
-      new Request(`${this.apiRoot()}/v1/user/subscription`),
+      (signal) => new Request(`${this.apiRoot()}/v1/user/subscription`, { signal }),
       apiKey,
       "communicating with ElevenLabs",
       { timeoutMs: 30_000 }
@@ -193,7 +264,7 @@ export class ElevenLabsClient {
     url.searchParams.set("metric", params.metric);
     url.searchParams.set("breakdown_type", params.breakdownType);
 
-    const response = await this.send(new Request(url.toString()), apiKey, "communicating with ElevenLabs", {
+    const response = await this.send((signal) => new Request(url.toString(), { signal }), apiKey, "communicating with ElevenLabs", {
       timeoutMs: 30_000,
     });
     return this.readJson(response, "ElevenLabs rejected the usage request.");
@@ -201,7 +272,10 @@ export class ElevenLabsClient {
 
   async getTranscript(apiKey: string, transcriptionId: string): Promise<TranscriptResponse> {
     const response = await this.send(
-      new Request(`${this.apiRoot()}/v1/speech-to-text/transcripts/${encodeURIComponent(transcriptionId)}`),
+      (signal) =>
+        new Request(`${this.apiRoot()}/v1/speech-to-text/transcripts/${encodeURIComponent(transcriptionId)}`, {
+          signal,
+        }),
       apiKey,
       "communicating with ElevenLabs",
       { timeoutMs: 30_000 }
@@ -211,9 +285,11 @@ export class ElevenLabsClient {
 
   async deleteTranscript(apiKey: string, transcriptionId: string): Promise<void> {
     const response = await this.send(
-      new Request(`${this.apiRoot()}/v1/speech-to-text/transcripts/${encodeURIComponent(transcriptionId)}`, {
-        method: "DELETE",
-      }),
+      (signal) =>
+        new Request(`${this.apiRoot()}/v1/speech-to-text/transcripts/${encodeURIComponent(transcriptionId)}`, {
+          method: "DELETE",
+          signal,
+        }),
       apiKey,
       "communicating with ElevenLabs",
       { timeoutMs: 30_000 }
