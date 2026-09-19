@@ -1660,9 +1660,11 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   });
   beginTrace(totalBytes, files.length);
 
+  // Held outside the try so the catch can throw away audio that no job will ever read.
+  const uploads = [];
+
   try {
     // The audio goes to R2 first, in parts, so no single request carries the whole file.
-    const uploads = [];
     for (const file of files) {
       uploads.push(await uploadFileInParts(file));
     }
@@ -1698,6 +1700,17 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
       startPolling(primaryJob.job_id);
     }
   } catch (error) {
+    // The upload succeeds and the submission that would have claimed it fails: without this the
+    // whole file stays in the bucket for good, with nothing left that refers to it.
+    await Promise.all(
+      uploads.map((upload) =>
+        fetch("/api/uploads/abort", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: upload.key }),
+        }).catch(() => undefined)
+      )
+    );
     elements.transcribeButton.disabled = false;
     failClientStage(error.message);
     setStatus(elements.formStatus, error.message, "error");

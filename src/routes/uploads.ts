@@ -110,17 +110,28 @@ uploadRoutes.post("/api/uploads/complete", async (c) => {
   }
 });
 
+/**
+ * Throws away audio that no job will ever read.
+ *
+ * With an upload_id this abandons a multipart upload that never finished. Without one it deletes
+ * an object that did finish but whose job was never created — a failed submission would otherwise
+ * leave the whole file in the bucket permanently, with nothing left holding a reference to it.
+ */
 uploadRoutes.post("/api/uploads/abort", async (c) => {
   const body = await c.req
     .json<{ key?: string; upload_id?: string }>()
     .catch(() => ({}) as { key?: string; upload_id?: string });
 
-  if (!body.key || !body.upload_id || !body.key.startsWith(`${UPLOAD_PREFIX}/`)) {
+  if (!body.key || !body.key.startsWith(`${UPLOAD_PREFIX}/`)) {
     throw httpError(400, "Missing upload details.");
   }
 
-  await c.env.TRANSCRIPTS.resumeMultipartUpload(body.key, body.upload_id)
-    .abort()
-    .catch(() => undefined);
+  if (body.upload_id) {
+    await c.env.TRANSCRIPTS.resumeMultipartUpload(body.key, body.upload_id)
+      .abort()
+      .catch(() => undefined);
+  } else {
+    await c.env.TRANSCRIPTS.delete(body.key).catch(() => undefined);
+  }
   return c.json({ aborted: true });
 });
