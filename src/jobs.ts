@@ -7,6 +7,7 @@ import {
 } from "./constants";
 import type { JobRepository } from "./db";
 import { ElevenLabsAPIError, ElevenLabsClient } from "./elevenlabsClient";
+import { recordEvent } from "./log";
 import { scanTranscriptMetadata } from "./responseScan";
 import { isHidden, isTerminal, serializeDetail } from "./serialization";
 import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames } from "./storage";
@@ -117,11 +118,17 @@ export class JobService {
     }
 
     const settings = record.effective_settings ?? {};
+    const startedAt = Date.now();
     record.status = "running";
     record.started_at = nowIso();
     record.status_detail = "Picked up by a worker.";
     addStage(record, "picked_up");
     await this.repository.saveJob(record);
+    await recordEvent(this.env.DB, jobId, "info", "run.started", {
+      source: record.source_type,
+      model: record.model,
+      upload_bytes: settings.upload_bytes ?? null,
+    });
 
     try {
       const fields = buildApiFields(this.submissionFromSettings(record));
@@ -150,6 +157,11 @@ export class JobService {
           "audio_streaming",
           `${(object.size / 1024 / 1024).toFixed(1)} MB as ${file.type}`
         );
+        await recordEvent(this.env.DB, jobId, "info", "audio.opened", {
+          bytes: object.size,
+          content_type: file.type,
+          name: file.name,
+        });
       }
 
       record.status_detail = file
@@ -158,9 +170,22 @@ export class JobService {
       addStage(record, "sent_to_elevenlabs");
       await this.repository.saveJob(record);
 
+      // Last thing written before a potentially long transfer. If the trail stops here, the
+      // consumer died during the upload rather than being rejected by ElevenLabs.
+      await recordEvent(this.env.DB, jobId, "info", "elevenlabs.request.start", {
+        streaming: Boolean(file),
+        bytes: file?.size ?? null,
+        elapsed_ms: Date.now() - startedAt,
+      });
+
       const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
         file,
+      });
+
+      await recordEvent(this.env.DB, jobId, "info", "elevenlabs.request.done", {
+        transcript_bytes: bytes.byteLength,
+        elapsed_ms: Date.now() - startedAt,
       });
 
       // Cancelled while the request was in flight: discard the result quietly.
@@ -183,6 +208,9 @@ export class JobService {
         `${(bytes.byteLength / 1024).toFixed(0)} KB of transcript JSON`
       );
       addStage(current, "done");
+      await recordEvent(this.env.DB, jobId, "info", "run.succeeded", {
+        elapsed_ms: Date.now() - startedAt,
+      });
       current.status = "success";
       current.status_detail = "Transcription completed.";
       current.completed_at = nowIso();
@@ -199,6 +227,13 @@ export class JobService {
       if (await this.isCancelled(jobId)) {
         return;
       }
+      await recordEvent(this.env.DB, jobId, "error", "run.failed", {
+        error: error instanceof Error ? error.message : String(error),
+        status: error instanceof ElevenLabsAPIError ? error.statusCode : null,
+        details: error instanceof ElevenLabsAPIError ? error.details : null,
+        stack: error instanceof Error ? error.stack?.slice(0, 1200) : null,
+        elapsed_ms: Date.now() - startedAt,
+      });
       const current = (await this.repository.getJob(jobId)) ?? record;
       current.effective_settings = record.effective_settings;
       addStage(current, "failed");
@@ -366,6 +401,11 @@ export class JobService {
       }
       const anchor = Date.parse(record.started_at ?? record.created_at);
       if (Number.isFinite(anchor) && anchor < cutoff) {
+        await recordEvent(this.env.DB, record.job_id, "error", "job.marked_interrupted", {
+          last_status: record.status,
+          stages: (record.effective_settings?.stages ?? []).map((stage) => stage.stage),
+          minutes_since_start: Math.round((Date.now() - anchor) / 60000),
+        });
         record.status = "error";
         record.error_message = INTERRUPTED_JOB_MESSAGE;
         record.status_detail = "Interrupted.";

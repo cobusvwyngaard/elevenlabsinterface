@@ -65,7 +65,7 @@ function extractMessage(payload: unknown, depth = 0): string | null {
 function buildStreamingMultipart(
   fields: [string, string][],
   file: { name: string; type: string; size: number; body: ReadableStream }
-): { body: ReadableStream; contentType: string; contentLength: number } {
+): { body: ReadableStream; contentType: string; contentLength: number; pump: () => Promise<void> } {
   const boundary = `----workbench${crypto.randomUUID().replace(/-/g, "")}`;
   const encoder = new TextEncoder();
 
@@ -82,29 +82,30 @@ function buildStreamingMultipart(
   const preamble = encoder.encode(preambleText);
   const epilogue = encoder.encode(`\r\n--${boundary}--\r\n`);
 
-  const reader = file.body.getReader();
-  const body = new ReadableStream({
-    start(controller) {
-      controller.enqueue(preamble);
-    },
-    async pull(controller) {
-      const { done, value } = await reader.read();
-      if (done) {
-        controller.enqueue(epilogue);
-        controller.close();
-        return;
-      }
-      controller.enqueue(value);
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
+  const contentLength = preamble.byteLength + file.size + epilogue.byteLength;
+
+  // FixedLengthStream rather than a ReadableStream with a pull(): the copy happens inside the
+  // runtime instead of running JavaScript per chunk, which matters against a 10ms CPU budget on
+  // a file of this size. It also sets a real Content-Length instead of chunked encoding.
+  const { readable, writable } = new FixedLengthStream(contentLength);
+
+  const pump = async () => {
+    const writer = writable.getWriter();
+    await writer.write(preamble);
+    writer.releaseLock();
+
+    await file.body.pipeTo(writable, { preventClose: true });
+
+    const closer = writable.getWriter();
+    await closer.write(epilogue);
+    await closer.close();
+  };
 
   return {
-    body,
+    body: readable,
     contentType: `multipart/form-data; boundary=${boundary}`,
-    contentLength: preamble.byteLength + file.size + epilogue.byteLength,
+    contentLength,
+    pump,
   };
 }
 
@@ -193,11 +194,20 @@ export class ElevenLabsClient {
     url.searchParams.set("enable_logging", options.enableLogging ? "true" : "false");
 
     let makeRequest: (signal: AbortSignal) => Request;
+    let pumpPromise: Promise<void> | undefined;
+    let pumpError: unknown;
     if (options.file) {
       // Built by hand and streamed: FormData would need the whole file in memory, which a
       // Worker cannot do. Sending it ourselves also means ElevenLabs never has to reach back
       // to us for the audio.
-      const { body, contentType, contentLength } = buildStreamingMultipart(fields, options.file);
+      const { body, contentType, contentLength, pump } = buildStreamingMultipart(fields, options.file);
+      // Started alongside the request rather than awaited: the request cannot complete until
+      // the body is written, and the body cannot be written until the request is being read.
+      // The failure is captured rather than left to become an unhandled rejection, which would
+      // be exactly the kind of silent death this is meant to surface.
+      pumpPromise = pump().catch((error) => {
+        pumpError = error;
+      });
       makeRequest = (signal) =>
         new Request(url.toString(), {
           method: "POST",
@@ -224,6 +234,15 @@ export class ElevenLabsClient {
         "Do not simply retry: ElevenLabs may already have processed the audio and spent the credits.",
       signal: options.signal,
     });
+
+    await pumpPromise;
+    if (pumpError) {
+      throw new ElevenLabsAPIError(
+        502,
+        `Failed while sending the audio to ElevenLabs: ${pumpError instanceof Error ? pumpError.message : String(pumpError)}`,
+        pumpError
+      );
+    }
 
     if (!response.ok) {
       // Error bodies are small, so parsing one costs nothing meaningful.

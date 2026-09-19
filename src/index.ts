@@ -3,6 +3,8 @@ import { HTTPException } from "hono/http-exception";
 import { JobRepository } from "./db";
 import { JobService } from "./jobs";
 import { KeyStore } from "./keyStore";
+import { recordEvent } from "./log";
+import { diagnosticRoutes } from "./routes/diagnostics";
 import { downloadRoutes } from "./routes/downloads";
 import { jobRoutes } from "./routes/jobs";
 import { settingsRoutes } from "./routes/settings";
@@ -20,6 +22,7 @@ app.route("/", uploadRoutes);
 app.route("/", transcriptionRoutes);
 app.route("/", jobRoutes);
 app.route("/", downloadRoutes);
+app.route("/", diagnosticRoutes);
 
 app.onError((error, c) => {
   if (error instanceof HTTPException) {
@@ -42,7 +45,14 @@ export default {
 
     for (const message of batch.messages) {
       const jobId = message.body.job_id;
+      // Attempt number distinguishes a first run from a retry after a silent death.
+      await recordEvent(env.DB, jobId, "info", "consumer.received", {
+        attempt: message.attempts,
+        has_api_key: Boolean(apiKey),
+      });
+
       if (!apiKey) {
+        await recordEvent(env.DB, jobId, "error", "consumer.no_api_key");
         const record = await repository.getJob(jobId);
         if (record) {
           record.status = "error";
@@ -57,8 +67,10 @@ export default {
 
       try {
         await service.runJob(jobId, apiKey);
+        await recordEvent(env.DB, jobId, "info", "consumer.finished");
       } catch (error) {
-        console.error(`Job ${jobId} crashed`, error);
+        // runJob records its own failures; reaching here means it threw past them.
+        await recordEvent(env.DB, jobId, "error", "consumer.crashed", error);
       }
       // Always ack: runJob records its own failure, and a retry would re-spend credits.
       message.ack();

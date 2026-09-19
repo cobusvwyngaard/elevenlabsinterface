@@ -59,6 +59,34 @@ the Request being re-created. Passing an init as `fetch`'s second argument, or w
 existing Request, silently sends zero bytes. `send()` therefore builds the Request once, with
 the abort signal already in it, and hands it to `fetch` untouched.
 
+## Diagnosing a failed job
+
+Three places record what happened, because they fail in different ways.
+
+`GET /api/diagnostics` returns the last jobs and an append-only event trail from D1 — one row
+per step, written as it happens rather than with the job record. Add `?job=<id>` for a single
+job. Because each row is written immediately, a consumer that is killed outright leaves a trail
+that simply stops at the last step it finished, which is the only way to tell "ElevenLabs
+rejected it" from "the worker died mid-upload":
+
+```sh
+curl -s https://<worker-host>/api/diagnostics?limit=20 | python3 -m json.tool
+```
+
+The events carry timings (`elapsed_ms`), sizes, upstream status codes, error payloads and
+stack traces. `consumer.received` records the queue attempt number, so a retry after a silent
+death is visible.
+
+**Cloudflare's Workers Logs** (`observability` is enabled in `wrangler.jsonc`) capture the same
+lines plus uncaught exceptions and hard kills that never got to write anything. Read them under
+the Worker → Logs in the dashboard. A search on the job id pulls one run together.
+
+The job's own **progress timeline** in the UI is the same story for the person waiting.
+
+Note that `/api/diagnostics` is not separately protected: it exposes filenames, timings and
+error text, though no API key or transcript content. It sits behind the same Cloudflare Access
+gate as everything else.
+
 ## Why the Worker does so little
 
 The Workers **Free** plan allows **10 ms of CPU per invocation**. Waiting on ElevenLabs costs
