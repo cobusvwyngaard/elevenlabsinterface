@@ -181,6 +181,14 @@ export class JobService {
       const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
         file,
+        onResponseHeaders: (status) => {
+          // Written without awaiting: the upload is still in flight, and if it dies from here on
+          // the trail should still show that the upstream had already answered, and with what.
+          void recordEvent(this.env.DB, jobId, "info", "elevenlabs.response.headers", {
+            status,
+            elapsed_ms: Date.now() - startedAt,
+          });
+        },
       });
 
       await recordEvent(this.env.DB, jobId, "info", "elevenlabs.request.done", {

@@ -188,6 +188,8 @@ export class ElevenLabsClient {
       enableLogging: boolean;
       file?: { name: string; type: string; size: number; body: ReadableStream };
       signal?: AbortSignal;
+      /** Fires the moment the upstream answers, so the status is recorded even if the body fails. */
+      onResponseHeaders?: (status: number) => void;
     }
   ): Promise<ArrayBuffer> {
     const url = new URL(this.apiUrl);
@@ -235,15 +237,15 @@ export class ElevenLabsClient {
       signal: options.signal,
     });
 
-    await pumpPromise;
-    if (pumpError) {
-      throw new ElevenLabsAPIError(
-        502,
-        `Failed while sending the audio to ElevenLabs: ${pumpError instanceof Error ? pumpError.message : String(pumpError)}`,
-        pumpError
-      );
-    }
+    options.onResponseHeaders?.(response.status);
 
+    await pumpPromise;
+
+    // The response is read before the pump is blamed, and this order matters. A server that
+    // rejects a request answers while the body is still going up and then drops the connection,
+    // which surfaces here as the pump failing with "Network connection lost". Checking the pump
+    // first threw away the status and message explaining the rejection, and reported the
+    // disconnect it caused instead — which is what happened to the 138 MB job.
     if (!response.ok) {
       // Error bodies are small, so parsing one costs nothing meaningful.
       let payload: unknown = null;
@@ -255,7 +257,15 @@ export class ElevenLabsClient {
       throw new ElevenLabsAPIError(
         response.status,
         extractMessage(payload) ?? "ElevenLabs rejected the transcription request.",
-        payload
+        { upstream: payload, send_failed: pumpError ? String(pumpError) : null }
+      );
+    }
+
+    if (pumpError) {
+      throw new ElevenLabsAPIError(
+        502,
+        `Failed while sending the audio to ElevenLabs: ${pumpError instanceof Error ? pumpError.message : String(pumpError)}`,
+        pumpError
       );
     }
 
