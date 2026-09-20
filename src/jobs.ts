@@ -9,6 +9,7 @@ import {
 import type { JobRepository } from "./db";
 import { ElevenLabsAPIError, ElevenLabsClient } from "./elevenlabsClient";
 import { recordEvent } from "./log";
+import { presignAudioUrl, presignConfigured } from "./presign";
 import { scanTranscriptMetadata } from "./responseScan";
 import { isHidden, isTerminal, serializeDetail } from "./serialization";
 import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames } from "./storage";
@@ -145,36 +146,49 @@ export class JobService {
         if (!settings.upload_key) {
           throw new Error("The uploaded audio is no longer available. Start the job again.");
         }
-        const object = await this.env.TRANSCRIPTS.get(settings.upload_key);
+        const object = await this.env.TRANSCRIPTS.head(settings.upload_key);
         if (!object) {
           throw new Error("The uploaded audio is no longer available. Start the job again.");
         }
 
-        // Authoritative size check. Submission validates what the browser declared, which is not
-        // the same thing as what is in the bucket, and forwarding an oversize body only earns a
-        // 413 from Cloudflare after the whole transfer has been set up.
-        if (object.size > MAX_DIRECT_UPLOAD_BYTES) {
-          throw new Error(oversizeMessage(object.size));
-        }
+        const contentType = object.httpMetadata?.contentType ?? "audio/mpeg";
+        const megabytes = `${(object.size / 1024 / 1024).toFixed(1)} MB`;
 
-        // Streamed from R2 to ElevenLabs without ever being held here. Sending it directly also
-        // means the transfer does not depend on ElevenLabs being able to reach back to us.
-        file = {
-          name: settings.upload_key.split("/").pop() ?? "audio",
-          type: object.httpMetadata?.contentType ?? "audio/mpeg",
-          size: object.size,
-          body: object.body,
-        };
-        addStage(
-          record,
-          "audio_streaming",
-          `${(object.size / 1024 / 1024).toFixed(1)} MB as ${file.type}`
-        );
-        await recordEvent(this.env.DB, jobId, "info", "audio.opened", {
-          bytes: object.size,
-          content_type: file.type,
-          name: file.name,
-        });
+        if (presignConfigured(this.env)) {
+          // Preferred path: ElevenLabs downloads the audio from R2 itself, so the bytes never pass
+          // through this Worker and Cloudflare's 100 MiB cap on an outgoing body never applies.
+          const url = await presignAudioUrl(this.env, settings.upload_key);
+          fields.push(["source_url", url]);
+          addStage(record, "audio_linked", `${megabytes} as ${contentType}`);
+          await recordEvent(this.env.DB, jobId, "info", "audio.linked", {
+            bytes: object.size,
+            content_type: contentType,
+            // The signature is a credential for as long as it lives, so only the shape is logged.
+            url_host: new URL(url).host,
+          });
+        } else {
+          // Fallback while signing is unconfigured. Cloudflare refuses an outgoing body over
+          // 100 MiB with a 413, so anything larger cannot be pushed from here at all.
+          if (object.size > MAX_DIRECT_UPLOAD_BYTES) {
+            throw new Error(oversizeMessage(object.size));
+          }
+          const body = await this.env.TRANSCRIPTS.get(settings.upload_key);
+          if (!body) {
+            throw new Error("The uploaded audio is no longer available. Start the job again.");
+          }
+          file = {
+            name: settings.upload_key.split("/").pop() ?? "audio",
+            type: contentType,
+            size: object.size,
+            body: body.body,
+          };
+          addStage(record, "audio_streaming", `${megabytes} as ${contentType}`);
+          await recordEvent(this.env.DB, jobId, "info", "audio.opened", {
+            bytes: object.size,
+            content_type: contentType,
+            name: file.name,
+          });
+        }
       }
 
       record.status_detail = file

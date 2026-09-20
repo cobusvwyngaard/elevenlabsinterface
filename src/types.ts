@@ -4,6 +4,14 @@ export interface Env {
   JOB_QUEUE: Queue<JobMessage>;
   ASSETS: Fetcher;
   ELEVENLABS_API_URL?: string;
+
+  // R2's S3 API credentials, used only to sign a short-lived download URL for the audio so
+  // ElevenLabs can fetch it straight from the bucket. Absent means that path is off and audio is
+  // pushed through the Worker instead, which Cloudflare caps at 100 MiB.
+  R2_ACCOUNT_ID?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  R2_BUCKET_NAME?: string;
 }
 
 export interface JobMessage {

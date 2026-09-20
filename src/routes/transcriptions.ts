@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { MAX_DIRECT_UPLOAD_BYTES, MAX_LINKED_UPLOAD_BYTES } from "../constants";
+import { presignConfigured } from "../presign";
 import { ElevenLabsClient } from "../elevenlabsClient";
 import { serializeDetail } from "../serialization";
 import { buildSubmission, SubmissionError, type SubmissionPayload } from "../transcription";
@@ -91,6 +93,7 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
           fileName: item.upload?.filename ?? null,
           fileBytes: item.upload?.size ?? null,
           fileContentType: item.upload?.content_type ?? null,
+          maxBytes: presignConfigured(c.env) ? MAX_LINKED_UPLOAD_BYTES : MAX_DIRECT_UPLOAD_BYTES,
         }
       );
     } catch (error) {

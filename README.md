@@ -36,7 +36,7 @@ speaker profiles, and every export.
 
 ## Why the audio never passes through the Worker
 
-Cloudflare rejects any request body over **100 MB**, and a Worker isolate has only **128 MB of
+Cloudflare rejects any request body over **100 MiB**, and a Worker isolate has only **128 MB of
 memory**. A one-hour recording breaks both: it cannot arrive in a single request, and it cannot
 be held in memory to forward on. So the audio is kept out of the Worker's hands entirely:
 
@@ -44,20 +44,50 @@ be held in memory to forward on. So the audio is kept out of the Worker's hands 
    which streams it into an R2 multipart upload. Each request is far below the body limit, and
    a part that fails is retried on its own rather than restarting the whole transfer.
 2. Job submission references the finished object by key, so it carries no audio at all.
-3. The consumer never holds the file. It streams the R2 object body straight into a
-   multipart request to ElevenLabs, built by hand in `src/elevenlabsClient.ts` because
-   `FormData` would materialise the whole file in memory.
+3. The consumer signs a short-lived R2 download URL and passes it to ElevenLabs as `source_url`.
+   ElevenLabs downloads the audio straight from the bucket. The bytes never enter the Worker.
 
-The ceiling is now ElevenLabs' own **5 GB** limit for a direct upload, not Cloudflare's.
+### The 100 MiB limit applies to what the Worker sends, too
 
-An earlier version instead handed ElevenLabs a signed URL to fetch the audio from. That
-depended on ElevenLabs being able to reach back to this Worker, which failed in practice, so
-the file is now pushed rather than pulled. Nothing needs to reach in from outside.
+This is the part that is easy to get wrong, and this project got it wrong for several days.
+Cloudflare's request body limit is not only about traffic arriving at the Worker — it also
+applies to a subrequest the Worker makes. Pushing a large file to ElevenLabs from inside a
+Worker is refused by Cloudflare with a **413 before any of it is sent**.
 
-One workerd detail worth knowing if this is ever touched: a streaming body does not survive
-the Request being re-created. Passing an init as `fetch`'s second argument, or wrapping an
-existing Request, silently sends zero bytes. `send()` therefore builds the Request once, with
-the abort signal already in it, and hands it to `fetch` untouched.
+Measured against the deployed Worker, driving the real client with a deliberately invalid API
+key so nothing was transcribed:
+
+| Body | Result |
+| --- | --- |
+| 4 MB | forwarded, upstream answered `401 Invalid API key` |
+| 64 MB | forwarded, answered in 1.6 s |
+| 103,809,024 bytes (99 MiB) | forwarded, answered in 3.3 s |
+| 105,906,176 bytes (101 MiB) | **413 in 30 ms** |
+| 144,703,488 bytes (138 MB) | **413 in 74 ms** |
+
+The cutoff is exactly 104,857,600 bytes. ElevenLabs is not the constraint: the same 138 MB
+upload sent by `curl` from outside Cloudflare is accepted and answered normally, and their
+documented ceiling is 5 GB. Nor is it the Workers plan — this limit follows the zone, so paying
+for Workers would not move it.
+
+Before the signed URL was in place, this surfaced as `Network connection lost` roughly 450 ms
+into the transfer, because the upstream's answer was being discarded in favour of the
+disconnect that answer caused. `transcribe()` now reads the response before blaming the body.
+
+### What happens without R2 signing credentials
+
+If `R2_ACCESS_KEY_ID` and friends are not set, the consumer falls back to streaming the audio
+through the Worker, and the 100 MiB ceiling applies. The limit is enforced in three places —
+in the browser before a byte is uploaded, at submission, and in the consumer against the real
+size of the object in the bucket rather than the size the browser claimed. `GET /api/settings`
+reports the effective limit as `max_upload_bytes`, so the browser always matches the server.
+
+With signing configured, the ceiling becomes ElevenLabs' **2 GB** limit for a fetched URL.
+
+One workerd detail worth knowing if the direct-push path is ever touched: a streaming body does
+not survive the Request being re-created. Passing an init as `fetch`'s second argument, or
+wrapping an existing Request, silently sends zero bytes. `send()` therefore builds the Request
+once, with the abort signal already in it, and hands it to `fetch` untouched.
 
 ## Diagnosing a failed job
 
@@ -142,6 +172,38 @@ until you replace it with the id printed by step 1.
 
 Free-plan allowances this app sits well inside: 100k requests/day, 10k queue operations/day,
 5 GB D1 storage, 10 GB R2 storage.
+
+### R2 signing credentials (needed for files over 100 MiB)
+
+Without these the app still works, but is capped at 100 MiB per recording for the reason set out
+above. With them, ElevenLabs downloads the audio from R2 itself and the cap becomes 2 GB. There
+is no extra cost: R2 egress is free, and this stays inside the free allowances.
+
+In the Cloudflare dashboard:
+
+1. **R2** → **API** → **Manage API tokens** → **Create API token**.
+2. Permission **Object Read only**, scoped to the `workbench-transcripts` bucket. Read is all
+   the Worker needs — it only ever signs download URLs.
+3. Copy the **Access Key ID**, the **Secret Access Key**, and your **Account ID**. The secret is
+   shown once.
+4. **Workers & Pages** → this Worker → **Settings** → **Variables and Secrets**, and add three
+   secrets:
+
+   | Name | Value |
+   | --- | --- |
+   | `R2_ACCOUNT_ID` | your Cloudflare account ID |
+   | `R2_ACCESS_KEY_ID` | the Access Key ID from step 3 |
+   | `R2_SECRET_ACCESS_KEY` | the Secret Access Key from step 3 |
+
+Locally, put the same three in `.dev.vars`, which is gitignored.
+
+The signed URL lives for two hours and carries its signature in the query string, so anyone
+holding it can download that one object until it expires. That is unavoidable — ElevenLabs has
+to fetch it without credentials — and is why the lifetime is short and object keys are random
+UUIDs. The audio is deleted from R2 as soon as the transcript comes back.
+
+`GET /api/settings` reports `audio_delivery` as `linked` once signing is configured, and
+`direct` otherwise, which is the quickest way to confirm the secrets took effect.
 
 ### Restrict access (do this before saving an API key)
 

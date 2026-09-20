@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { MAX_DIRECT_UPLOAD_BYTES, MAX_LINKED_UPLOAD_BYTES } from "../constants";
+import { presignConfigured } from "../presign";
 import {
   AUDIO_TYPES,
   ENTITY_DETECTION_OPTIONS,
@@ -32,6 +34,10 @@ settingsRoutes.get("/api/settings", async (c) => {
     entity_detection: ENTITY_DETECTION_OPTIONS,
     languages: LANGUAGES,
     presets: AUDIO_TYPE_PRESETS,
+    // The browser refuses an oversize file before uploading it, and which limit applies depends on
+    // whether this deployment can sign a download URL for ElevenLabs to fetch instead.
+    max_upload_bytes: presignConfigured(c.env) ? MAX_LINKED_UPLOAD_BYTES : MAX_DIRECT_UPLOAD_BYTES,
+    audio_delivery: presignConfigured(c.env) ? "linked" : "direct",
   });
 });
 

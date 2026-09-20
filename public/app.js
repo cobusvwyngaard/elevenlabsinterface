@@ -277,12 +277,15 @@ function syncControls() {
 // Cloudflare rejects any single request body over 100 MB, so audio goes to R2 in parts well
 // under that. ElevenLabs caps a URL-fetched file at 2 GB, which is the real ceiling now.
 const PART_SIZE = 20 * 1024 * 1024;
-// Cloudflare caps a request body at 100 MiB on the Free and Pro plans, and that cap applies to the
-// Worker's own outgoing request to ElevenLabs, not just to what the browser sends. Measured against
-// the live Worker: 103,809,024 bytes is forwarded and answered, 105,906,176 bytes comes back 413
-// before any of it is sent. Checked here so an oversize file is refused in the file picker rather
-// than after a long upload. A few KB is held back for the multipart framing.
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024 - 8 * 1024;
+// How large a file this deployment can actually handle, which the server decides and reports.
+//
+// When it can sign an R2 download URL, ElevenLabs fetches the audio itself and the ceiling is
+// their 2 GB. When it cannot, the audio has to travel through the Worker, and Cloudflare caps an
+// outgoing request body at 100 MiB on this plan: measured against the live Worker, 103,809,024
+// bytes is forwarded and answered, and 105,906,176 bytes comes back 413 before any of it is sent.
+// Either way the check happens here, so an oversize file is refused at the file picker rather than
+// after a long upload. The conservative figure holds until settings load.
+let maxUploadBytes = 100 * 1024 * 1024 - 8 * 1024;
 const PART_RETRIES = 3;
 const STALL_AFTER_MS = 20000;
 
@@ -1246,6 +1249,9 @@ async function openJob(jobId) {
 
 async function loadSettings() {
   const settings = await fetchJson("/api/settings");
+  if (Number.isFinite(settings.max_upload_bytes) && settings.max_upload_bytes > 0) {
+    maxUploadBytes = settings.max_upload_bytes;
+  }
   renderKeyState(settings);
   applyDefaults(settings.last_used_defaults);
   return settings;
@@ -1647,14 +1653,17 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   const files = activeSourceMode() === "upload" ? [...elements.fileInput.files] : [];
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
 
-  const oversized = files.find((file) => file.size > MAX_UPLOAD_BYTES);
+  const oversized = files.find((file) => file.size > maxUploadBytes);
   if (oversized) {
     setStatus(
       elements.formStatus,
-      `${oversized.name} is ${formatBytes(oversized.size)}. This app cannot forward more than ` +
-        `${formatBytes(MAX_UPLOAD_BYTES)} to ElevenLabs in one request, so the upload would ` +
-        `finish and then be rejected. ElevenLabs itself would accept the file; the limit is on ` +
-        `the way through. Shorten or re-encode the recording to get under the limit.`,
+      maxUploadBytes > 1024 * 1024 * 1024
+        ? `${oversized.name} is ${formatBytes(oversized.size)}. ElevenLabs accepts up to ` +
+            `${formatBytes(maxUploadBytes)} per file.`
+        : `${oversized.name} is ${formatBytes(oversized.size)}. This app cannot forward more ` +
+            `than ${formatBytes(maxUploadBytes)} to ElevenLabs in one request, so the upload ` +
+            `would finish and then be rejected. ElevenLabs itself would accept the file; the ` +
+            `limit is on the way through. Shorten or re-encode the recording to get under it.`,
       "error"
     );
     return;

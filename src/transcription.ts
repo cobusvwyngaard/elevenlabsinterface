@@ -32,6 +32,8 @@ export interface SubmissionFile {
   fileName: string | null;
   fileBytes: number | null;
   fileContentType: string | null;
+  /** Depends on whether this deployment can hand ElevenLabs a link instead of pushing the bytes. */
+  maxBytes?: number;
 }
 
 const CHECKBOX_TRUE = new Set(["1", "true", "on", "yes"]);
@@ -77,8 +79,9 @@ export function buildSubmission(payload: SubmissionPayload, file: SubmissionFile
     if (cloudStorageUrl) {
       throw new SubmissionError("Choose either a local file or an HTTPS URL, not both.");
     }
-    if ((file.fileBytes ?? 0) > MAX_DIRECT_UPLOAD_BYTES) {
-      throw new SubmissionError(oversizeMessage(file.fileBytes ?? 0));
+    const maxBytes = file.maxBytes ?? MAX_DIRECT_UPLOAD_BYTES;
+    if ((file.fileBytes ?? 0) > maxBytes) {
+      throw new SubmissionError(oversizeMessage(file.fileBytes ?? 0, maxBytes));
     }
   } else {
     if (!cloudStorageUrl) {
@@ -296,13 +299,21 @@ export function effectiveSettings(submission: TranscriptionSubmission): Effectiv
 }
 
 
-/** Says which limit was hit and by how much, rather than leaving a number to be guessed at. */
-export function oversizeMessage(bytes: number): string {
-  const mb = (value: number) => `${(value / 1024 / 1024).toFixed(0)} MB`;
+/** Says which limit was hit and why, rather than leaving a number to be guessed at. */
+export function oversizeMessage(bytes: number, maxBytes: number = MAX_DIRECT_UPLOAD_BYTES): string {
+  const size = (value: number) =>
+    value >= 1024 * 1024 * 1024
+      ? `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`
+      : `${(value / 1024 / 1024).toFixed(0)} MB`;
+
+  if (maxBytes > MAX_DIRECT_UPLOAD_BYTES) {
+    return `This file is ${size(bytes)}. ElevenLabs accepts up to ${size(maxBytes)} per file.`;
+  }
   return (
-    `This file is ${mb(bytes)}. Cloudflare will not let this app forward more than ` +
-    `${mb(MAX_DIRECT_UPLOAD_BYTES)} to ElevenLabs in one request, so the transcription would be ` +
-    `rejected after the upload finished. ElevenLabs itself would accept the file; the limit is on ` +
-    `the way through. Shorten or re-encode the recording to get under the limit.`
+    `This file is ${size(bytes)}. Cloudflare will not let this app forward more than ` +
+    `${size(maxBytes)} to ElevenLabs in one request, so the transcription would be rejected ` +
+    `after the upload finished. ElevenLabs itself would accept the file; the limit is on the way ` +
+    `through. Configure R2 signing so ElevenLabs can download the audio directly, or shorten or ` +
+    `re-encode the recording to get under the limit.`
   );
 }

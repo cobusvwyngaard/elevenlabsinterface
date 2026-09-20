@@ -90,3 +90,11 @@ export const TRANSCRIPT_PREVIEW_LIMIT = 800;
  * A few KB is held back for the multipart framing, which counts toward the same body.
  */
 export const MAX_DIRECT_UPLOAD_BYTES = 100 * 1024 * 1024 - 8 * 1024;
+
+/**
+ * The largest file ElevenLabs will fetch from a URL, per their documentation.
+ *
+ * This is the ceiling once the audio is handed over as a signed link instead of being pushed
+ * through the Worker, which is the whole reason for signing one.
+ */
+export const MAX_LINKED_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
