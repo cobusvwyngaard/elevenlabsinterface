@@ -1653,6 +1653,20 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   const files = activeSourceMode() === "upload" ? [...elements.fileInput.files] : [];
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
 
+  // A tab left open across a deploy is still holding whatever limit applied when it loaded, and
+  // the end of a long upload is the worst possible moment to discover that. One small request
+  // first, so the file is measured against what the server enforces right now.
+  if (files.length) {
+    try {
+      const fresh = await fetchJson("/api/settings");
+      if (Number.isFinite(fresh.max_upload_bytes) && fresh.max_upload_bytes > 0) {
+        maxUploadBytes = fresh.max_upload_bytes;
+      }
+    } catch {
+      // Not worth refusing to start over: fall back to the limit we already have.
+    }
+  }
+
   const oversized = files.find((file) => file.size > maxUploadBytes);
   if (oversized) {
     setStatus(
