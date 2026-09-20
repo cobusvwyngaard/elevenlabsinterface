@@ -75,43 +75,23 @@ function safeParse(value: string): unknown {
  * TEMPORARY. Measures how much of a request body this Worker can actually push upstream.
  *
  * The 138 MB job dies about 450ms into the transfer with "Network connection lost", and a plain
- * curl of 150 MB to the same endpoint from elsewhere succeeds, so the limit is on this side. This
- * drives the real client code with a deliberately invalid key: the upload is exercised in full,
- * the upstream answers 400 for the key without transcribing anything, and no credits are spent.
+ * curl of 150 MB to the same endpoint from elsewhere succeeds, so the limit is on this side. The
+ * source is an R2 object, because that is what the real job streams, and the key is a deliberately
+ * invalid one: the transfer is exercised in full and the upstream rejects the key without
+ * transcribing anything, so no credits are spent.
  *
  * Delete once the threshold is known.
  */
 diagnosticRoutes.post("/api/diagnostics/streamtest", async (c) => {
-  type Probe = { bytes?: number; source?: string; key?: string };
+  type Probe = { key?: string };
   const body = await c.req.json<Probe>().catch(() => ({}) as Probe);
-  const size = Math.min(Math.max(Number(body.bytes) || 8 * 1024 * 1024, 1024), 400 * 1024 * 1024);
+  if (!body.key || !body.key.startsWith("uploads/")) {
+    return c.json({ error: "Pass the key of an object under uploads/." }, 400);
+  }
 
-  let stream: ReadableStream;
-  let actual = size;
-  let label: string;
-
-  if (body.source === "r2" && body.key) {
-    const object = await c.env.TRANSCRIPTS.get(body.key);
-    if (!object) {
-      return c.json({ error: "No such object." }, 404);
-    }
-    stream = object.body;
-    actual = object.size;
-    label = `r2:${body.key}`;
-  } else {
-    // A fixed-length stream of zeros, filled by the runtime rather than by JavaScript, so the
-    // test measures the transfer and not the cost of generating the bytes.
-    const fixed = new FixedLengthStream(size);
-    const chunk = new Uint8Array(1024 * 1024);
-    void (async () => {
-      const writer = fixed.writable.getWriter();
-      for (let sent = 0; sent < size; sent += chunk.byteLength) {
-        await writer.write(chunk.subarray(0, Math.min(chunk.byteLength, size - sent)));
-      }
-      await writer.close();
-    })();
-    stream = fixed.readable;
-    label = "synthetic";
+  const object = await c.env.TRANSCRIPTS.get(body.key);
+  if (!object) {
+    return c.json({ error: "No such object." }, 404);
   }
 
   const client = new ElevenLabsClient(c.env.ELEVENLABS_API_URL);
@@ -122,7 +102,12 @@ diagnosticRoutes.post("/api/diagnostics/streamtest", async (c) => {
   try {
     await client.transcribe("x".repeat(51), [["model_id", "scribe_v1"]], {
       enableLogging: false,
-      file: { name: "probe.m4a", type: "audio/mp4", size: actual, body: stream },
+      file: {
+        name: "probe.m4a",
+        type: object.httpMetadata?.contentType ?? "audio/mp4",
+        size: object.size,
+        body: object.body,
+      },
       onResponseHeaders: (value) => {
         status = value;
       },
@@ -133,8 +118,8 @@ diagnosticRoutes.post("/api/diagnostics/streamtest", async (c) => {
   }
 
   const result = {
-    source: label,
-    bytes: actual,
+    key: body.key,
+    bytes: object.size,
     upstream_status: status,
     outcome,
     elapsed_ms: Date.now() - startedAt,
