@@ -77,3 +77,16 @@ export const CANCELLED_JOB_MESSAGE =
   "Cancelled locally. ElevenLabs may still finish processing and charge credits for work already started.";
 
 export const TRANSCRIPT_PREVIEW_LIMIT = 800;
+
+/**
+ * The largest audio file this Worker can forward to ElevenLabs.
+ *
+ * Cloudflare caps a request body at 100 MiB on the Free and Pro plans, and the cap applies to a
+ * Worker's outgoing subrequest as well as to incoming traffic. Measured against the live Worker:
+ * a 103,809,024 byte body is forwarded and answered normally, and 105,906,176 bytes comes back
+ * 413 in 30ms, before any of it is sent. ElevenLabs itself is not the constraint — the same
+ * 138 MB upload by curl from outside is accepted and answered.
+ *
+ * A few KB is held back for the multipart framing, which counts toward the same body.
+ */
+export const MAX_DIRECT_UPLOAD_BYTES = 100 * 1024 * 1024 - 8 * 1024;

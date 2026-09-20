@@ -1,4 +1,9 @@
-import { VALID_ENTITY_DETECTION, VALID_MODELS, VALID_TIMESTAMPS } from "./constants";
+import {
+  MAX_DIRECT_UPLOAD_BYTES,
+  VALID_ENTITY_DETECTION,
+  VALID_MODELS,
+  VALID_TIMESTAMPS,
+} from "./constants";
 import { AUDIO_TYPE_PRESETS, presetFor } from "./presets";
 import type { EffectiveSettings, TranscriptionSubmission } from "./types";
 
@@ -71,6 +76,9 @@ export function buildSubmission(payload: SubmissionPayload, file: SubmissionFile
     }
     if (cloudStorageUrl) {
       throw new SubmissionError("Choose either a local file or an HTTPS URL, not both.");
+    }
+    if ((file.fileBytes ?? 0) > MAX_DIRECT_UPLOAD_BYTES) {
+      throw new SubmissionError(oversizeMessage(file.fileBytes ?? 0));
     }
   } else {
     if (!cloudStorageUrl) {
@@ -285,4 +293,16 @@ export function effectiveSettings(submission: TranscriptionSubmission): Effectiv
     source_label: submission.source_label,
     cloud_storage_url: submission.cloud_storage_url,
   };
+}
+
+
+/** Says which limit was hit and by how much, rather than leaving a number to be guessed at. */
+export function oversizeMessage(bytes: number): string {
+  const mb = (value: number) => `${(value / 1024 / 1024).toFixed(0)} MB`;
+  return (
+    `This file is ${mb(bytes)}. Cloudflare will not let this app forward more than ` +
+    `${mb(MAX_DIRECT_UPLOAD_BYTES)} to ElevenLabs in one request, so the transcription would be ` +
+    `rejected after the upload finished. ElevenLabs itself would accept the file; the limit is on ` +
+    `the way through. Shorten or re-encode the recording to get under the limit.`
+  );
 }

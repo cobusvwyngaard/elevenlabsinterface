@@ -1,6 +1,4 @@
 import { Hono } from "hono";
-import { ElevenLabsClient } from "../elevenlabsClient";
-import { recordEvent } from "../log";
 import { services, type AppContext } from "./deps";
 
 export const diagnosticRoutes = new Hono<AppContext>();
@@ -70,60 +68,3 @@ function safeParse(value: string): unknown {
     return value;
   }
 }
-
-/**
- * TEMPORARY. Measures how much of a request body this Worker can actually push upstream.
- *
- * The 138 MB job dies about 450ms into the transfer with "Network connection lost", and a plain
- * curl of 150 MB to the same endpoint from elsewhere succeeds, so the limit is on this side. The
- * source is an R2 object, because that is what the real job streams, and the key is a deliberately
- * invalid one: the transfer is exercised in full and the upstream rejects the key without
- * transcribing anything, so no credits are spent.
- *
- * Delete once the threshold is known.
- */
-diagnosticRoutes.post("/api/diagnostics/streamtest", async (c) => {
-  type Probe = { key?: string };
-  const body = await c.req.json<Probe>().catch(() => ({}) as Probe);
-  if (!body.key || !body.key.startsWith("uploads/")) {
-    return c.json({ error: "Pass the key of an object under uploads/." }, 400);
-  }
-
-  const object = await c.env.TRANSCRIPTS.get(body.key);
-  if (!object) {
-    return c.json({ error: "No such object." }, 404);
-  }
-
-  const client = new ElevenLabsClient(c.env.ELEVENLABS_API_URL);
-  const startedAt = Date.now();
-  let status: number | null = null;
-  let outcome: string;
-
-  try {
-    await client.transcribe("x".repeat(51), [["model_id", "scribe_v1"]], {
-      enableLogging: false,
-      file: {
-        name: "probe.m4a",
-        type: object.httpMetadata?.contentType ?? "audio/mp4",
-        size: object.size,
-        body: object.body,
-      },
-      onResponseHeaders: (value) => {
-        status = value;
-      },
-    });
-    outcome = "accepted";
-  } catch (error) {
-    outcome = error instanceof Error ? error.message : String(error);
-  }
-
-  const result = {
-    key: body.key,
-    bytes: object.size,
-    upstream_status: status,
-    outcome,
-    elapsed_ms: Date.now() - startedAt,
-  };
-  await recordEvent(c.env.DB, null, "info", "diagnostics.streamtest", result);
-  return c.json(result);
-});

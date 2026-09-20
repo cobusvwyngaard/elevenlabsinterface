@@ -277,7 +277,12 @@ function syncControls() {
 // Cloudflare rejects any single request body over 100 MB, so audio goes to R2 in parts well
 // under that. ElevenLabs caps a URL-fetched file at 2 GB, which is the real ceiling now.
 const PART_SIZE = 20 * 1024 * 1024;
-const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+// Cloudflare caps a request body at 100 MiB on the Free and Pro plans, and that cap applies to the
+// Worker's own outgoing request to ElevenLabs, not just to what the browser sends. Measured against
+// the live Worker: 103,809,024 bytes is forwarded and answered, 105,906,176 bytes comes back 413
+// before any of it is sent. Checked here so an oversize file is refused in the file picker rather
+// than after a long upload. A few KB is held back for the multipart framing.
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024 - 8 * 1024;
 const PART_RETRIES = 3;
 const STALL_AFTER_MS = 20000;
 
@@ -1646,7 +1651,10 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
   if (oversized) {
     setStatus(
       elements.formStatus,
-      `${oversized.name} is ${formatBytes(oversized.size)}. ElevenLabs accepts up to ${formatBytes(MAX_UPLOAD_BYTES)} per file.`,
+      `${oversized.name} is ${formatBytes(oversized.size)}. This app cannot forward more than ` +
+        `${formatBytes(MAX_UPLOAD_BYTES)} to ElevenLabs in one request, so the upload would ` +
+        `finish and then be rejected. ElevenLabs itself would accept the file; the limit is on ` +
+        `the way through. Shorten or re-encode the recording to get under the limit.`,
       "error"
     );
     return;

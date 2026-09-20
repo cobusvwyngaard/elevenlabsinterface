@@ -2,6 +2,7 @@ import {
   AUDIO_TYPE_LABELS,
   CANCELLED_JOB_MESSAGE,
   INTERRUPTED_JOB_MESSAGE,
+  MAX_DIRECT_UPLOAD_BYTES,
   MODEL_LABELS,
   TERMINAL_JOB_STATUSES,
 } from "./constants";
@@ -11,7 +12,12 @@ import { recordEvent } from "./log";
 import { scanTranscriptMetadata } from "./responseScan";
 import { isHidden, isTerminal, serializeDetail } from "./serialization";
 import { deleteJobObjects, deleteSpeakerNames, readSpeakerNames } from "./storage";
-import { buildApiFields, effectiveSettings, submissionDefaults } from "./transcription";
+import {
+  buildApiFields,
+  effectiveSettings,
+  oversizeMessage,
+  submissionDefaults,
+} from "./transcription";
 import type { Env, JobRecord, TranscriptionSubmission } from "./types";
 
 /** A job still non-terminal past this is unrecoverable: no consumer invocation lives that long. */
@@ -142,6 +148,13 @@ export class JobService {
         const object = await this.env.TRANSCRIPTS.get(settings.upload_key);
         if (!object) {
           throw new Error("The uploaded audio is no longer available. Start the job again.");
+        }
+
+        // Authoritative size check. Submission validates what the browser declared, which is not
+        // the same thing as what is in the bucket, and forwarding an oversize body only earns a
+        // 413 from Cloudflare after the whole transfer has been set up.
+        if (object.size > MAX_DIRECT_UPLOAD_BYTES) {
+          throw new Error(oversizeMessage(object.size));
         }
 
         // Streamed from R2 to ElevenLabs without ever being held here. Sending it directly also
