@@ -208,19 +208,44 @@ UUIDs. The audio is deleted from R2 as soon as the transcript comes back.
 ### Restrict access (do this before saving an API key)
 
 The Worker URL is public by default, and the app stores your ElevenLabs API key server-side —
-so anyone who finds the URL could spend your credits. Put Cloudflare Access in front of it:
+so anyone who finds the URL could spend your credits.
 
-1. Cloudflare dashboard → **Zero Trust** → **Access** → **Applications** → **Add an application**
-   → **Self-hosted**.
-2. Set the application domain to your Worker's hostname.
-3. Add a policy: action **Allow**, rule **Emails** → your own email address.
-4. Save, then confirm that opening the app in a private window prompts for authentication.
+Access is now attached to the Worker itself rather than to a hostname, which matters here: a
+`workers.dev` subdomain is not a zone you own, so the older self-hosted-application flow did not
+cleanly cover it. The Worker-level policy covers every route, Custom Domain, `workers.dev`
+hostname and preview URL at once.
 
-Nothing needs a bypass: the audio is pushed to ElevenLabs from inside the Worker, so no
-outside service ever has to reach a route here.
+1. Cloudflare dashboard → **Workers & Pages** → this Worker → the **Access** tab.
+2. **Protect this Worker behind Access**.
+3. Choose **All traffic**, not Previews only. Previews only leaves production open.
+4. Allow by Cloudflare account membership, your email address, or your email domain.
+5. **Apply Access**, then confirm a private window prompts for authentication.
+
+Zero Trust is free up to 50 users, so this costs nothing at one user.
+
+Nothing the app depends on needs a bypass. ElevenLabs fetches the audio from
+`r2.cloudflarestorage.com`, not from this Worker, so a signed download URL keeps working. The
+queue consumer runs inside the runtime rather than over HTTP, and CI deploys go through the
+Cloudflare API, so neither is affected.
+
+Be aware of what it does close off: `GET /api/diagnostics` stops being readable from outside
+without a service token, so the event trail has to be read from a signed-in browser. Turn Access
+on last, after a large file has been confirmed working end to end.
 
 This replaces the Windows Credential Manager decision in spec §2. There is no per-device
 encrypted secret store on Cloudflare; the protection is the Access gate, not the storage layer.
+
+### Housekeeping: expire abandoned uploads
+
+An upload that completes but whose job is never created has nothing left pointing at it. The app
+discards those itself, but a lifecycle rule catches anything a failed or stale browser session
+leaves behind:
+
+Cloudflare dashboard → **R2** → `workbench-transcripts` → **Settings** → **Object lifecycle
+rules** → **Add rule**, scoped to prefix `uploads/`, deleting objects after 1 day and aborting
+incomplete multipart uploads after 1 day.
+
+Audio is deleted as soon as its transcript comes back, so a day is generous.
 
 ## Local development
 
