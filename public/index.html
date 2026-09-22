@@ -156,6 +156,26 @@
                   <input id="fileInput" name="files" type="file" accept="audio/*,video/*" multiple>
                 </label>
                 <p class="result-meta">Select one or more files. Each file becomes its own ElevenLabs transcription job and uses credits separately.</p>
+
+                <label class="field">
+                  <span>Compress before uploading</span>
+                  <select id="compressionMode" name="compression_mode">
+                    <option value="auto" selected>Only when the file is too large</option>
+                    <option value="always">Always</option>
+                    <option value="off">Never — upload the original</option>
+                  </select>
+                </label>
+
+                <label class="field" id="compressionQualityField">
+                  <span>Compressed quality</span>
+                  <select id="compressionBitrate" name="compression_bitrate">
+                    <option value="32000">Smallest — 32 kbps</option>
+                    <option value="48000" selected>Balanced — 48 kbps</option>
+                    <option value="64000">Highest — 64 kbps</option>
+                  </select>
+                </label>
+
+                <p class="result-meta" id="compressionHint"></p>
               </div>
 
               <div id="urlPanel" class="field-group hidden">
@@ -482,6 +502,8 @@
         }
       };
     </script>
+    <script src="/ogg-opus.js" defer></script>
+    <script src="/audio-compress.js" defer></script>
     <script src="/transcript-utils.js" defer></script>
     <script src="/exporters.js" defer></script>
     <script src="/app.js" defer></script>

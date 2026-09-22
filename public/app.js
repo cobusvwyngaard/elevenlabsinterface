@@ -45,6 +45,9 @@ const elements = {
   entityDetectionCustomInput: document.getElementById("entityDetectionCustomInput"),
   formStatus: document.getElementById("formStatus"),
   transcribeButton: document.getElementById("transcribeButton"),
+  compressionMode: document.getElementById("compressionMode"),
+  compressionBitrate: document.getElementById("compressionBitrate"),
+  compressionHint: document.getElementById("compressionHint"),
   cancelJobButton: document.getElementById("cancelJobButton"),
   historyList: document.getElementById("historyList"),
   refreshHistoryButton: document.getElementById("refreshHistoryButton"),
@@ -292,6 +295,8 @@ const STALL_AFTER_MS = 20000;
 // Ordered pipeline. Client stages are observed in the browser; server stages arrive on the
 // job record. Without this, a slow upload and a dead connection look identical.
 const TRACE_STEPS = [
+  { key: "compressing", label: "Compressing on this computer", side: "client" },
+  { key: "compression_done", label: "Compressed", side: "client" },
   { key: "uploading", label: "Uploading to Cloudflare", side: "client" },
   { key: "accepted", label: "Accepted by Cloudflare", side: "client" },
   { key: "audio_stored", label: "Audio saved to storage", side: "server" },
@@ -310,7 +315,9 @@ const trace = {
   fileCount: 0,
   uploadedBytes: 0,
   lastProgressAt: null,
+  uploadStartedAt: null,
   stalled: false,
+  compressing: false,
   clientStages: [],
   serverStages: [],
   retries: [],
@@ -341,7 +348,7 @@ function formatDuration(ms) {
   return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
-function beginTrace(totalBytes, fileCount) {
+function beginTrace(totalBytes, fileCount, { compressing = false } = {}) {
   trace.active = true;
   trace.startedAt = Date.now();
   trace.totalBytes = totalBytes;
@@ -349,25 +356,37 @@ function beginTrace(totalBytes, fileCount) {
   trace.uploadedBytes = 0;
   trace.lastProgressAt = Date.now();
   trace.stalled = false;
-  trace.clientStages = [{ stage: "uploading", at: new Date().toISOString() }];
+  trace.compressing = compressing;
+  // Compression runs first, so the upload has not started when it is the leading step.
+  trace.clientStages = [
+    { stage: compressing ? "compressing" : "uploading", at: new Date().toISOString() },
+  ];
   trace.serverStages = [];
   trace.retries = [];
   trace.failure = null;
 
   // Reset the header and status line too, or they keep showing the previous job's outcome
   // while this one is still uploading.
+  trace.uploadStartedAt = compressing ? null : Date.now();
+
+  const phase = compressing ? "compressing" : totalBytes > 0 ? "uploading" : "submitting";
   setStatus(
     elements.formStatus,
-    totalBytes > 0 ? "Uploading to Cloudflare..." : "Submitting the job..."
+    {
+      compressing: "Compressing on this computer...",
+      uploading: "Uploading to Cloudflare...",
+      submitting: "Submitting the job...",
+    }[phase]
   );
   elements.activityPanel.classList.remove("hidden");
-  elements.activityBadge.textContent = totalBytes > 0 ? "UPLOADING" : "SUBMITTING";
+  elements.activityBadge.textContent = phase.toUpperCase();
   elements.activityBadge.classList.remove("success", "error", "pending");
   elements.activityBadge.classList.add("pending");
-  elements.activityDetail.textContent =
-    totalBytes > 0
-      ? `Sending ${fileCount} file${fileCount === 1 ? "" : "s"} (${formatBytes(totalBytes)}) to Cloudflare.`
-      : "Submitting the job.";
+  elements.activityDetail.textContent = {
+    compressing: `Re-encoding ${fileCount} file${fileCount === 1 ? "" : "s"} before anything is sent. Nothing leaves this computer yet.`,
+    uploading: `Sending ${fileCount} file${fileCount === 1 ? "" : "s"} (${formatBytes(totalBytes)}) to Cloudflare.`,
+    submitting: "Submitting the job.",
+  }[phase];
   elements.cancelJobButton.classList.add("hidden");
   stopElapsedTimer();
   state.elapsedAnchor = trace.startedAt;
@@ -381,6 +400,134 @@ function beginTrace(totalBytes, fileCount) {
 
 function markRetry(partNumber, attempt, message) {
   trace.retries.push({ partNumber, attempt, message, at: Date.now() });
+  renderTrace();
+}
+
+/** Says what will happen to the chosen files before the button is pressed. */
+function refreshCompressionHint() {
+  if (!elements.compressionHint) {
+    return;
+  }
+  const files = [...(elements.fileInput?.files ?? [])];
+  const quality = elements.compressionQualityField ?? document.getElementById("compressionQualityField");
+  const mode = elements.compressionMode?.value ?? "auto";
+  if (quality) {
+    quality.classList.toggle("hidden", mode === "off");
+  }
+
+  if (!files.length) {
+    setStatus(
+      elements.compressionHint,
+      window.AudioCompressor?.isSupported?.()
+        ? "Re-encodes speech to mono Opus on this computer. Nothing is sent while it runs."
+        : "This browser cannot re-encode audio. Chrome or Edge can."
+    );
+    return;
+  }
+
+  const planned = files.filter((file) => compressionPlanFor(file, maxUploadBytes).compress);
+  if (!planned.length) {
+    const over = files.filter((file) => file.size > maxUploadBytes);
+    setStatus(
+      elements.compressionHint,
+      over.length
+        ? `${over[0].name} is over the ${formatBytes(maxUploadBytes)} limit and will not be compressed with this setting.`
+        : `Uploading as is — ${formatBytes(files.reduce((sum, f) => sum + f.size, 0))}.`,
+      over.length ? "error" : ""
+    );
+    return;
+  }
+
+  // A constant bitrate makes the output size a function of duration alone, which is not known
+  // until the file is decoded, so this is quoted per hour rather than as a total.
+  const bitrate = Number(elements.compressionBitrate?.value) || 48000;
+  const mbPerHour = ((bitrate / 8) * 3600) / 1e6;
+  setStatus(
+    elements.compressionHint,
+    `${planned.length} file${planned.length === 1 ? "" : "s"} will be re-encoded to mono Opus at ` +
+      `${bitrate / 1000} kbps first: about ${mbPerHour.toFixed(0)} MB per hour of audio, and ` +
+      `roughly a minute of processing per 90 minutes of recording.`
+  );
+}
+
+/** Explains which limit an oversize file hit, and that compressing is the way under it. */
+function oversizeMessage(file) {
+  if (maxUploadBytes > 1024 * 1024 * 1024) {
+    return `${file.name} is ${formatBytes(file.size)}. ElevenLabs accepts up to ${formatBytes(maxUploadBytes)} per file.`;
+  }
+  return (
+    `${file.name} is ${formatBytes(file.size)}. This app cannot forward more than ` +
+    `${formatBytes(maxUploadBytes)} to ElevenLabs in one request, so the upload would finish ` +
+    `and then be rejected. ElevenLabs itself would accept the file; the limit is on the way ` +
+    `through. Set "Compress before uploading" to compress it down to size.`
+  );
+}
+
+/** Whether this file should be re-encoded before upload, given the chosen mode. */
+function compressionPlanFor(file, limitBytes) {
+  const mode = elements.compressionMode?.value ?? "auto";
+  if (mode === "off") {
+    return { compress: false };
+  }
+  if (mode === "auto" && file.size <= limitBytes) {
+    return { compress: false };
+  }
+  const support = window.AudioCompressor?.canCompress?.(file);
+  if (!support?.ok) {
+    // In "auto" this file was already too big, so the reason has to reach the user either way.
+    return { compress: false, unavailable: support?.reason ?? "Compression is not available here." };
+  }
+  return { compress: true, bitrate: Number(elements.compressionBitrate?.value) || 48000 };
+}
+
+/** Re-encodes the selected files, reporting progress against the whole set rather than each one. */
+async function compressFiles(files, limitBytes) {
+  const results = [];
+  let index = 0;
+
+  for (const file of files) {
+    const plan = compressionPlanFor(file, limitBytes);
+    if (!plan.compress) {
+      if (plan.unavailable && file.size > limitBytes) {
+        throw new Error(`${file.name} is ${formatBytes(file.size)} and cannot be compressed here. ${plan.unavailable}`);
+      }
+      results.push(file);
+      index++;
+      continue;
+    }
+
+    const position = index;
+    const outcome = await window.AudioCompressor.compress(file, {
+      bitrate: plan.bitrate,
+      onProgress: (fraction) => {
+        const overall = (position + fraction) / files.length;
+        updateClientStage(
+          "compressing",
+          `${Math.round(overall * 100)}% of ${files.length} file${files.length === 1 ? "" : "s"}`
+        );
+      },
+    });
+
+    results.push(outcome.file);
+    setStatus(
+      elements.compressionHint,
+      `${file.name}: ${formatBytes(outcome.originalBytes)} to ${formatBytes(outcome.compressedBytes)} ` +
+        `in ${Math.round(outcome.elapsedMs / 1000)}s.`
+    );
+    index++;
+  }
+
+  return results;
+}
+
+/** Updates the detail on a stage already in the trace, instead of appending another copy. */
+function updateClientStage(stage, detail) {
+  const existing = trace.clientStages.find((entry) => entry.stage === stage);
+  if (existing) {
+    existing.detail = detail;
+  } else {
+    trace.clientStages.push({ stage, at: new Date().toISOString(), detail });
+  }
   renderTrace();
 }
 
@@ -656,13 +803,19 @@ function syncActivityClock(job) {
 }
 
 function uploadSummary() {
-  const { uploadedBytes, totalBytes, startedAt } = trace;
+  const { uploadedBytes, totalBytes } = trace;
   if (!totalBytes) {
     return "No file to upload";
   }
+  // Nothing useful to report until the upload is the thing that is actually happening. The size
+  // is deliberately not quoted while compressing, because the figure to hand is the one before
+  // compression and is not what will be sent.
+  if (!trace.uploadStartedAt) {
+    return trace.compressing ? "Waiting for compression to finish" : `Waiting for ${formatBytes(totalBytes)}`;
+  }
 
   const percent = Math.min(100, Math.round((uploadedBytes / totalBytes) * 100));
-  const elapsed = Math.max(1, (Date.now() - startedAt) / 1000);
+  const elapsed = Math.max(1, (Date.now() - trace.uploadStartedAt) / 1000);
   const rate = uploadedBytes / elapsed;
   const parts = [`${percent}%`, `${formatBytes(uploadedBytes)} of ${formatBytes(totalBytes)}`];
 
@@ -688,14 +841,19 @@ function renderTrace() {
     }
   }
 
+  // Only meaningful once bytes are meant to be moving. Compression can run for minutes without
+  // sending anything, and warning about a dropped connection then is simply wrong.
   const uploadStalled =
+    Boolean(trace.uploadStartedAt) &&
     !seen.has("upload_complete") &&
     trace.lastProgressAt &&
     Date.now() - trace.lastProgressAt > STALL_AFTER_MS;
 
   const steps = TRACE_STEPS.filter(
     (step) => step.key !== "audio_stored" || trace.totalBytes > 0
-  ).filter((step) => step.key !== "audio_streaming" || trace.totalBytes > 0);
+  )
+    .filter((step) => step.key !== "audio_streaming" || trace.totalBytes > 0)
+    .filter((step) => !step.key.startsWith("compress") || trace.compressing);
 
   const failed = Boolean(trace.failure) || seen.has("failed");
 
@@ -727,7 +885,9 @@ function renderTrace() {
       if (step.key === "uploading") {
         if (isComplete("uploading")) {
           // Keep what the transfer actually cost: the point of a trace is finding the slow step.
-          const took = new Date(seen.get("upload_complete").at).getTime() - trace.startedAt;
+          const took =
+            new Date(seen.get("upload_complete").at).getTime() -
+            (trace.uploadStartedAt ?? trace.startedAt);
           if (trace.totalBytes > 0 && Number.isFinite(took)) {
             const rate = trace.totalBytes / Math.max(1, took / 1000);
             note = `${formatBytes(trace.totalBytes)} in ${formatDuration(took)} (${formatBytes(rate)}/s)`;
@@ -1667,20 +1827,17 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
     }
   }
 
-  const oversized = files.find((file) => file.size > maxUploadBytes);
-  if (oversized) {
-    setStatus(
-      elements.formStatus,
-      maxUploadBytes > 1024 * 1024 * 1024
-        ? `${oversized.name} is ${formatBytes(oversized.size)}. ElevenLabs accepts up to ` +
-            `${formatBytes(maxUploadBytes)} per file.`
-        : `${oversized.name} is ${formatBytes(oversized.size)}. This app cannot forward more ` +
-            `than ${formatBytes(maxUploadBytes)} to ElevenLabs in one request, so the upload ` +
-            `would finish and then be rejected. ElevenLabs itself would accept the file; the ` +
-            `limit is on the way through. Shorten or re-encode the recording to get under it.`,
-      "error"
-    );
-    return;
+  // Whether anything will be re-encoded decides what the first progress step should say.
+  const willCompress = files.some((file) => compressionPlanFor(file, maxUploadBytes).compress);
+
+  // The size check happens after compression, since compressing is exactly how an oversize file
+  // is meant to get under the limit. Only a file that is still too large afterwards is refused.
+  if (!willCompress) {
+    const oversized = files.find((file) => file.size > maxUploadBytes);
+    if (oversized) {
+      setStatus(elements.formStatus, oversizeMessage(oversized), "error");
+      return;
+    }
   }
 
   elements.transcribeButton.disabled = true;
@@ -1689,14 +1846,38 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
     title: "Starting a new transcription",
     body: "The transcript will appear here once this job finishes. Progress is shown under the button above.",
   });
-  beginTrace(totalBytes, files.length);
+  beginTrace(totalBytes, files.length, { compressing: willCompress });
 
   // Held outside the try so the catch can throw away audio that no job will ever read.
   const uploads = [];
 
   try {
+    let pending = files;
+    if (willCompress) {
+      pending = await compressFiles(files, maxUploadBytes);
+      const stillTooBig = pending.find((file) => file.size > maxUploadBytes);
+      if (stillTooBig) {
+        throw new Error(
+          `${stillTooBig.name} is still ${formatBytes(stillTooBig.size)} after compressing. ` +
+            `Try a lower quality setting, or shorten the recording.`
+        );
+      }
+      const before = files.reduce((sum, file) => sum + file.size, 0);
+      const after = pending.reduce((sum, file) => sum + file.size, 0);
+      markClientStage("compression_done", `${formatBytes(before)} to ${formatBytes(after)}`);
+      // The upload bar measures the bytes actually going out, not what was picked, and its clock
+      // and stall detector only start now that something is genuinely being sent.
+      trace.totalBytes = after;
+      trace.uploadStartedAt = Date.now();
+      trace.lastProgressAt = Date.now();
+      markClientStage("uploading");
+      setStatus(elements.formStatus, "Uploading to Cloudflare...");
+      elements.activityBadge.textContent = "UPLOADING";
+      elements.activityDetail.textContent = `Sending ${formatBytes(after)} to Cloudflare.`;
+    }
+
     // The audio goes to R2 first, in parts, so no single request carries the whole file.
-    for (const file of files) {
+    for (const file of pending) {
       uploads.push(await uploadFileInParts(file));
     }
     if (files.length) {
@@ -1751,6 +1932,10 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
 window.addEventListener("DOMContentLoaded", async () => {
   updateSourcePanels();
   syncControls();
+  elements.fileInput?.addEventListener("change", refreshCompressionHint);
+  elements.compressionMode?.addEventListener("change", refreshCompressionHint);
+  elements.compressionBitrate?.addEventListener("change", refreshCompressionHint);
+  refreshCompressionHint();
   try {
     const settings = await loadSettings();
     if (settings.api_key_saved) {

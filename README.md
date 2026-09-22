@@ -74,6 +74,39 @@ Before the signed URL was in place, this surfaced as `Network connection lost` r
 into the transfer, because the upstream's answer was being discarded in favour of the
 disconnect that answer caused. `transcribe()` now reads the response before blaming the body.
 
+### Compressing before upload
+
+A recording can also be made to fit rather than routed around the limit. The browser re-encodes
+it to mono Opus before anything is uploaded, chosen with **Compress before uploading**:
+
+| Mode | Behaviour |
+| --- | --- |
+| Only when the file is too large | The default. Small files are uploaded untouched. |
+| Always | Re-encodes everything, which also shortens the upload. |
+| Never | Uploads the original, and refuses anything over the limit. |
+
+Measured on a 2.5 hour, 139.1 MB AAC recording: **52.6 MB out, in 100 seconds** — about 90x
+realtime, and roughly 22 MB per hour of audio at the default 48 kbps. The fixture was pink and
+brown noise, which is close to the worst case for Opus; speech compresses further.
+
+On quality: the published work on Opus and speech recognition puts word error rate a percentage
+point above clean speech at 6 kbps and converging on it well below 32 kbps, so 48 kbps mono is
+comfortably inside the range where transcription is unaffected. That evidence is about word
+accuracy and not about **diarization**, which leans on spectral detail that a low bitrate discards
+first. If speaker separation matters more than the last fraction of a percent of word accuracy,
+compare a short excerpt at 64 kbps against the original before trusting a long recording to it.
+
+The browser's own codecs do the work, through WebCodecs. ffmpeg.wasm would have been less code,
+but its core is 30.7 MB and Cloudflare caps a single static asset at 25 MiB, so it could not be
+served from here at all. Chrome and Edge can decode AAC; Firefox and Safari may not, and the
+option reports that rather than failing late.
+
+Output is Opus in Ogg, muxed in `public/ogg-opus.js`. The container is written by hand because
+WebCodecs hands back bare packets. Its CRC is checked against an independent implementation, and
+the muxed output is verified by decoding it with ffmpeg: a fixture stepping through six
+frequencies comes back with the right tone in the right ten-second window, which is what proves
+the pipeline neither drifts nor drops time.
+
 ### What happens without R2 signing credentials
 
 If `R2_ACCESS_KEY_ID` and friends are not set, the consumer falls back to streaming the audio
