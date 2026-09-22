@@ -122,6 +122,36 @@ not survive the Request being re-created. Passing an init as `fetch`'s second ar
 wrapping an existing Request, silently sends zero bytes. `send()` therefore builds the Request
 once, with the abort signal already in it, and hands it to `fetch` untouched.
 
+## The 120 second ceiling on waiting
+
+Cloudflare cuts a Worker's outgoing request off after a fixed **120 second proxy read timeout**,
+which cannot be raised below an Enterprise plan. A long recording cannot be transcribed inside one
+synchronous request from here: the 2.5 hour job that produced this section came back **524 after
+126.9 seconds**, with the credits spent either way.
+
+ElevenLabs is not the one timing out. Its API sits behind Google (`via: 1.1 google`,
+`x-region: us-central1`) and 524 is a Cloudflare status, so the cut came from this side.
+
+So the audio is submitted with `webhook=true`, which returns an id immediately, and the transcript
+is collected afterwards by polling `GET /v1/speech-to-text/transcripts/{id}`. **The webhook itself
+is never received** — nothing here has to be publicly reachable, which matters once Access is on.
+Each check is its own short queue message rather than a connection held open, because the same
+120 second ceiling applies to waiting as to transcribing: 20 seconds after submission, then every
+30 seconds, giving up just short of half an hour.
+
+If ElevenLabs refuses the asynchronous request with a 4xx — for instance if a deployment cannot
+use webhooks at all — the job falls back to the synchronous path, which still works for anything
+short. That fallback re-opens the audio from R2 first: a streamed body can only be sent once, and
+without doing so the retry would send an empty file and blame ElevenLabs for it.
+
+Two cases deliberately do **not** fall back. A 5xx or a 524 means the audio may already have been
+accepted, and a 202 carrying no transcription id means it certainly was. Sending it again would be
+charged twice, so the job fails and says where the transcript might still be found.
+
+A job ElevenLabs has accepted is given 45 minutes before the stale sweep gives up on it, rather
+than the 20 a job that never got that far gets. Judged by the same clock, the sweep would declare
+a transcription still in progress dead and stop collecting it.
+
 ## Diagnosing a failed job
 
 Three places record what happened, because they fail in different ways.

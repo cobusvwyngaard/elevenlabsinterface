@@ -92,6 +92,7 @@ export default {
       const jobId = message.body.job_id;
       // Attempt number distinguishes a first run from a retry after a silent death.
       await recordEvent(env.DB, jobId, "info", "consumer.received", {
+        kind: message.body.kind ?? "run",
         attempt: message.attempts,
         has_api_key: Boolean(apiKey),
       });
@@ -111,7 +112,16 @@ export default {
       }
 
       try {
-        await service.runJob(jobId, apiKey);
+        if (message.body.kind === "poll" && message.body.transcription_id) {
+          await service.pollJob(
+            jobId,
+            message.body.transcription_id,
+            message.body.poll_attempt ?? 1,
+            apiKey
+          );
+        } else {
+          await service.runJob(jobId, apiKey);
+        }
         await recordEvent(env.DB, jobId, "info", "consumer.finished");
       } catch (error) {
         // runJob records its own failures; reaching here means it threw past them.

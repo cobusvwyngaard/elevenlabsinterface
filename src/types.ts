@@ -16,6 +16,10 @@ export interface Env {
 
 export interface JobMessage {
   job_id: string;
+  /** "poll" messages check on a transcription already submitted, rather than starting one. */
+  kind?: "run" | "poll";
+  transcription_id?: string;
+  poll_attempt?: number;
   /** R2 key holding the uploaded audio, for upload-mode jobs. */
   upload_key?: string;
   upload_bytes?: number;

@@ -304,6 +304,7 @@ const TRACE_STEPS = [
   { key: "picked_up", label: "Picked up by a worker", side: "server" },
   { key: "audio_streaming", label: "Streaming audio to ElevenLabs", side: "server" },
   { key: "sent_to_elevenlabs", label: "Sent to ElevenLabs", side: "server" },
+  { key: "accepted_by_elevenlabs", label: "Accepted — transcribing", side: "server" },
   { key: "transcript_received", label: "Transcript received", side: "server" },
   { key: "done", label: "Complete", side: "server" },
 ];

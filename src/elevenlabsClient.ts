@@ -57,6 +57,27 @@ function extractMessage(payload: unknown, depth = 0): string | null {
 
 
 /**
+ * A last-resort description when the upstream gives no message of its own.
+ *
+ * 524 is worth naming precisely. It is Cloudflare's, not ElevenLabs': a Worker's outgoing request
+ * is cut off after a fixed 120 second proxy read timeout, which cannot be raised below Enterprise.
+ * A long recording cannot be transcribed inside one synchronous request from here, and reporting
+ * that as a rejection sends anyone reading it looking in the wrong place.
+ */
+function describeStatus(status: number): string {
+  if (status === 524) {
+    return (
+      "ElevenLabs did not answer within the 120 seconds Cloudflare allows a Worker to wait. " +
+      "The recording is long enough to need the asynchronous path rather than one request."
+    );
+  }
+  if (status === 413) {
+    return "The request body was refused as too large before it reached ElevenLabs.";
+  }
+  return `ElevenLabs rejected the transcription request (status ${status}).`;
+}
+
+/**
  * Assembles a multipart/form-data body that streams the audio rather than holding it.
  *
  * The exact length is computed up front so the request carries a Content-Length: a chunked
@@ -256,7 +277,7 @@ export class ElevenLabsClient {
       }
       throw new ElevenLabsAPIError(
         response.status,
-        extractMessage(payload) ?? "ElevenLabs rejected the transcription request.",
+        extractMessage(payload) ?? describeStatus(response.status),
         { upstream: payload, send_failed: pumpError ? String(pumpError) : null }
       );
     }
@@ -270,6 +291,128 @@ export class ElevenLabsClient {
     }
 
     return response.arrayBuffer();
+  }
+
+  /**
+   * Submits the audio and returns as soon as ElevenLabs has accepted it.
+   *
+   * Cloudflare cuts a Worker's outgoing request off after 120 seconds, which a long recording
+   * cannot be transcribed inside. `webhook=true` makes ElevenLabs answer immediately with an id,
+   * and the transcript is collected afterwards by polling for it. The webhook itself is never
+   * received: nothing here has to be publicly reachable for this to work.
+   */
+  async submitAsync(
+    apiKey: string,
+    fields: [string, string][],
+    options: {
+      enableLogging: boolean;
+      file?: { name: string; type: string; size: number; body: ReadableStream };
+      signal?: AbortSignal;
+      onResponseHeaders?: (status: number) => void;
+    }
+  ): Promise<{ transcriptionId: string | null; payload: unknown }> {
+    const url = new URL(this.apiUrl);
+    url.searchParams.set("enable_logging", options.enableLogging ? "true" : "false");
+
+    const withWebhook: [string, string][] = [...fields, ["webhook", "true"]];
+
+    let makeRequest: (signal: AbortSignal) => Request;
+    let pumpPromise: Promise<void> | undefined;
+    let pumpError: unknown;
+
+    if (options.file) {
+      const { body, contentType, contentLength, pump } = buildStreamingMultipart(withWebhook, options.file);
+      pumpPromise = pump().catch((error) => {
+        pumpError = error;
+      });
+      makeRequest = (signal) =>
+        new Request(url.toString(), {
+          method: "POST",
+          body,
+          headers: { "content-type": contentType, "content-length": String(contentLength) },
+          signal,
+          duplex: "half",
+        } as RequestInit & { duplex: "half" });
+    } else {
+      const form = new FormData();
+      for (const [key, value] of withWebhook) {
+        form.append(key, value);
+      }
+      makeRequest = (signal) => new Request(url.toString(), { method: "POST", body: form, signal });
+    }
+
+    const response = await this.send(makeRequest, apiKey, "uploading the file to ElevenLabs", {
+      signal: options.signal,
+    });
+    options.onResponseHeaders?.(response.status);
+    await pumpPromise;
+
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      /* an error response may carry no JSON at all */
+    }
+
+    if (!response.ok) {
+      throw new ElevenLabsAPIError(response.status, extractMessage(payload) ?? describeStatus(response.status), {
+        upstream: payload,
+        send_failed: pumpError ? String(pumpError) : null,
+      });
+    }
+    if (pumpError) {
+      throw new ElevenLabsAPIError(
+        502,
+        `Failed while sending the audio to ElevenLabs: ${pumpError instanceof Error ? pumpError.message : String(pumpError)}`,
+        pumpError
+      );
+    }
+
+    const record = (payload ?? {}) as Record<string, unknown>;
+    const transcriptionId =
+      typeof record.transcription_id === "string" ? record.transcription_id : null;
+    return { transcriptionId, payload };
+  }
+
+  /**
+   * Fetches a transcript that may not exist yet.
+   *
+   * A transcription still running is not an error worth failing a job over, so "not ready" is
+   * reported as a value and only a genuine failure throws.
+   */
+  async fetchTranscriptIfReady(
+    apiKey: string,
+    transcriptionId: string
+  ): Promise<{ ready: boolean; bytes?: ArrayBuffer; status: number }> {
+    const response = await this.send(
+      (signal) =>
+        new Request(`${this.apiRoot()}/v1/speech-to-text/transcripts/${encodeURIComponent(transcriptionId)}`, {
+          signal,
+        }),
+      apiKey,
+      "waiting for ElevenLabs to return the completed transcript",
+      { timeoutMs: 60_000 }
+    );
+
+    if (response.ok) {
+      return { ready: true, bytes: await response.arrayBuffer(), status: response.status };
+    }
+    // Still being worked on, or not visible yet. Either way it is worth asking again.
+    if (response.status === 404 || response.status === 409 || response.status === 425) {
+      return { ready: false, status: response.status };
+    }
+
+    let payload: unknown = null;
+    try {
+      payload = await response.json();
+    } catch {
+      /* not every error carries JSON */
+    }
+    throw new ElevenLabsAPIError(
+      response.status,
+      extractMessage(payload) ?? describeStatus(response.status),
+      payload
+    );
   }
 
   async getSubscription(apiKey: string): Promise<Record<string, unknown>> {

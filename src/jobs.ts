@@ -24,6 +24,19 @@ import type { Env, JobRecord, TranscriptionSubmission } from "./types";
 /** A job still non-terminal past this is unrecoverable: no consumer invocation lives that long. */
 const STALE_JOB_MINUTES = 20;
 
+/** How long to wait before first asking whether an accepted transcription has finished. */
+const FIRST_POLL_DELAY_SECONDS = 20;
+/** Gap between later checks, and how many to make before giving up (20 x 30s plus the first). */
+const POLL_INTERVAL_SECONDS = 30;
+const MAX_POLL_ATTEMPTS = 60;
+/**
+ * How long a job that ElevenLabs has accepted may sit before it is given up on.
+ *
+ * Comfortably past the polling deadline above, so the sweep only ever catches a job whose polling
+ * has actually stopped rather than one still waiting its turn.
+ */
+const STALE_POLLING_JOB_MINUTES = 45;
+
 export interface BatchInfo {
   batchId?: string;
   batchIndex?: number;
@@ -205,17 +218,91 @@ export class JobService {
         elapsed_ms: Date.now() - startedAt,
       });
 
+      const onResponseHeaders = (status: number) => {
+        // Written without awaiting: the upload is still in flight, and if it dies from here on
+        // the trail should still show that the upstream had already answered, and with what.
+        void recordEvent(this.env.DB, jobId, "info", "elevenlabs.response.headers", {
+          status,
+          elapsed_ms: Date.now() - startedAt,
+        });
+      };
+
+      // Asynchronous first. Cloudflare cuts a Worker's outgoing request off after 120 seconds,
+      // which anything longer than a short recording cannot be transcribed inside, and the
+      // credits are spent whether or not the answer arrives before the cut.
+      if (settings.force_sync !== true) {
+        try {
+          const accepted = await this.client.submitAsync(apiKey, fields, {
+            enableLogging: settings.enable_logging !== false,
+            file,
+            onResponseHeaders,
+          });
+          if (accepted.transcriptionId) {
+            await recordEvent(this.env.DB, jobId, "info", "elevenlabs.accepted", {
+              transcription_id: accepted.transcriptionId,
+              elapsed_ms: Date.now() - startedAt,
+            });
+            const current = (await this.repository.getJob(jobId)) ?? record;
+            current.effective_settings = record.effective_settings;
+            addStage(current, "accepted_by_elevenlabs", "Transcribing; the result is collected when ready");
+            current.transcription_id = accepted.transcriptionId;
+            current.status_detail = "ElevenLabs is transcribing. This is checked every 20 seconds.";
+            await this.repository.saveJob(current);
+
+            await this.env.JOB_QUEUE.send(
+              { job_id: jobId, kind: "poll", transcription_id: accepted.transcriptionId, poll_attempt: 1 },
+              { delaySeconds: FIRST_POLL_DELAY_SECONDS }
+            );
+
+            if (settings.upload_key) {
+              // ElevenLabs has the audio now; nothing here needs it again.
+              await this.env.TRANSCRIPTS.delete(settings.upload_key).catch(() => undefined);
+            }
+            return;
+          }
+          // Accepted, but with no id there is nothing to collect later. Deliberately not retried
+          // on the synchronous path: ElevenLabs has the audio and is charging for it, and sending
+          // it again would pay for the same recording twice.
+          await recordEvent(this.env.DB, jobId, "error", "elevenlabs.async_without_id", {
+            payload: accepted.payload,
+          });
+          throw new Error(
+            "ElevenLabs accepted the audio but returned no transcription id, so the result cannot " +
+              "be collected. It was not sent again, because that would be charged twice. The " +
+              "transcript may appear in your ElevenLabs history."
+          );
+        } catch (error) {
+          // Falling back is only safe before the audio has been accepted; once it has, retrying
+          // would submit and pay for the same recording twice.
+          const status = error instanceof ElevenLabsAPIError ? error.statusCode : null;
+          await recordEvent(this.env.DB, jobId, "warn", "elevenlabs.async_unavailable", {
+            status,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (status === 524 || status === null || status >= 500) {
+            throw error;
+          }
+          // The body was consumed by the attempt that just failed, so the retry needs its own.
+          // Without this the fallback would send an empty file and blame ElevenLabs for it.
+          if (file) {
+            if (!settings.upload_key) {
+              throw error;
+            }
+            const reopened = await this.env.TRANSCRIPTS.get(settings.upload_key);
+            if (!reopened) {
+              throw error;
+            }
+            file = { ...file, body: reopened.body };
+          }
+          // A 4xx means the request was understood and refused, so the synchronous path is worth
+          // trying: it is the one that works when this deployment cannot use webhooks.
+        }
+      }
+
       const bytes = await this.client.transcribe(apiKey, fields, {
         enableLogging: settings.enable_logging !== false,
         file,
-        onResponseHeaders: (status) => {
-          // Written without awaiting: the upload is still in flight, and if it dies from here on
-          // the trail should still show that the upstream had already answered, and with what.
-          void recordEvent(this.env.DB, jobId, "info", "elevenlabs.response.headers", {
-            status,
-            elapsed_ms: Date.now() - startedAt,
-          });
-        },
+        onResponseHeaders,
       });
 
       await recordEvent(this.env.DB, jobId, "info", "elevenlabs.request.done", {
@@ -286,6 +373,118 @@ export class JobService {
       if (settings.upload_key) {
         await this.env.TRANSCRIPTS.delete(settings.upload_key).catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Collects a transcript that ElevenLabs accepted earlier.
+   *
+   * Each check is its own short-lived queue message rather than a connection held open, because
+   * the 120 second ceiling that made the synchronous path fail applies just as much to waiting.
+   */
+  async pollJob(jobId: string, transcriptionId: string, attempt: number, apiKey: string): Promise<void> {
+    const record = await this.repository.getJob(jobId);
+    if (!record || isTerminal(record)) {
+      return;
+    }
+
+    let outcome;
+    try {
+      outcome = await this.client.fetchTranscriptIfReady(apiKey, transcriptionId);
+    } catch (error) {
+      await recordEvent(this.env.DB, jobId, "error", "poll.failed", {
+        attempt,
+        transcription_id: transcriptionId,
+        error: error instanceof Error ? error.message : String(error),
+        status: error instanceof ElevenLabsAPIError ? error.statusCode : null,
+      });
+      await this.failJob(jobId, record, error);
+      return;
+    }
+
+    if (!outcome.ready) {
+      await recordEvent(this.env.DB, jobId, "info", "poll.not_ready", {
+        attempt,
+        status: outcome.status,
+      });
+
+      if (attempt >= MAX_POLL_ATTEMPTS) {
+        await this.failJob(
+          jobId,
+          record,
+          new Error(
+            "ElevenLabs accepted the audio but the transcript did not arrive within half an hour. " +
+              `It may still appear in your ElevenLabs history under id ${transcriptionId}.`
+          )
+        );
+        return;
+      }
+
+      record.status_detail = `ElevenLabs is still transcribing (checked ${attempt} time${attempt === 1 ? "" : "s"}).`;
+      await this.repository.saveJob(record);
+      await this.env.JOB_QUEUE.send(
+        { job_id: jobId, kind: "poll", transcription_id: transcriptionId, poll_attempt: attempt + 1 },
+        { delaySeconds: POLL_INTERVAL_SECONDS }
+      );
+      return;
+    }
+
+    const bytes = outcome.bytes!;
+    await recordEvent(this.env.DB, jobId, "info", "poll.ready", {
+      attempt,
+      transcript_bytes: bytes.byteLength,
+    });
+
+    if (await this.isCancelled(jobId)) {
+      return;
+    }
+
+    const transcriptKey = `${jobId}/transcript.json`;
+    await this.env.TRANSCRIPTS.put(transcriptKey, bytes, {
+      httpMetadata: { contentType: "application/json" },
+    });
+
+    const scanned = scanTranscriptMetadata(bytes);
+    const current = (await this.repository.getJob(jobId)) ?? record;
+    addStage(current, "transcript_received", `${(bytes.byteLength / 1024).toFixed(0)} KB of transcript JSON`);
+    addStage(current, "done");
+    current.status = "success";
+    current.status_detail = "Transcription completed.";
+    current.completed_at = nowIso();
+    current.response_json_path = transcriptKey;
+    current.transcription_id = scanned.transcriptionId ?? transcriptionId;
+    current.detected_language = scanned.languageCode;
+    current.transcript_preview = scanned.preview;
+    await this.repository.saveJob(current);
+    await recordEvent(this.env.DB, jobId, "info", "run.succeeded", { via: "poll", attempt });
+
+    const uploadKey = current.effective_settings?.upload_key;
+    if (uploadKey) {
+      await this.env.TRANSCRIPTS.delete(uploadKey).catch(() => undefined);
+    }
+  }
+
+  /** Shared failure path, so a job that dies while polling records what a failed run would. */
+  private async failJob(jobId: string, fallback: JobRecord, error: unknown): Promise<void> {
+    if (await this.isCancelled(jobId)) {
+      return;
+    }
+    const current = (await this.repository.getJob(jobId)) ?? fallback;
+    addStage(current, "failed");
+    current.status = "error";
+    current.completed_at = nowIso();
+    current.error_message =
+      error instanceof ElevenLabsAPIError
+        ? `${error.message}${error.details ? ` [${JSON.stringify(error.details).slice(0, 400)}]` : ""}`
+        : error instanceof Error
+          ? error.message || error.name
+          : String(error);
+    current.status_detail = "The transcription failed.";
+    await this.repository.saveJob(current);
+
+    const uploadKey = current.effective_settings?.upload_key;
+    if (uploadKey) {
+      await this.env.TRANSCRIPTS.delete(uploadKey).catch(() => undefined);
     }
   }
 
@@ -428,12 +627,15 @@ export class JobService {
 
   /** No process survives a restart on Workers, so stalled jobs are failed on read. */
   async markStaleJobsAsInterrupted(records: JobRecord[]): Promise<JobRecord[]> {
-    const cutoff = Date.now() - STALE_JOB_MINUTES * 60 * 1000;
-
     for (const record of records) {
       if (TERMINAL_JOB_STATUSES.has(record.status)) {
         continue;
       }
+      // A job ElevenLabs has accepted is legitimately alive for as long as it is being polled for,
+      // which is longer than a job that never got that far should ever sit. Judging both by the
+      // same clock would declare a transcription still in progress dead and stop collecting it.
+      const minutes = record.transcription_id ? STALE_POLLING_JOB_MINUTES : STALE_JOB_MINUTES;
+      const cutoff = Date.now() - minutes * 60 * 1000;
       const anchor = Date.parse(record.started_at ?? record.created_at);
       if (Number.isFinite(anchor) && anchor < cutoff) {
         await recordEvent(this.env.DB, record.job_id, "error", "job.marked_interrupted", {
