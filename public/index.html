@@ -151,10 +151,14 @@
               </div>
 
               <div id="uploadPanel" class="field-group">
-                <label class="field">
-                  <span>Local audio or video files</span>
+                <span class="field-label">Local audio or video files</span>
+                <div id="dropZone" class="drop-zone" tabindex="0" role="button"
+                     aria-label="Choose files, or drop them here">
+                  <p class="drop-zone-primary">Drop audio or video here</p>
+                  <p class="drop-zone-secondary">or click to choose files</p>
+                  <p id="dropZoneFiles" class="drop-zone-files"></p>
                   <input id="fileInput" name="files" type="file" accept="audio/*,video/*" multiple>
-                </label>
+                </div>
                 <p class="result-meta">Select one or more files. Each file becomes its own ElevenLabs transcription job and uses credits separately.</p>
 
                 <label class="field">
@@ -353,6 +357,12 @@
             </div>
 
             <div id="resultsPanel" class="hidden">
+              <label class="field export-name-field">
+                <span>Saved file name</span>
+                <input id="exportFilename" type="text" spellcheck="false"
+                       placeholder="transcript" autocomplete="off">
+              </label>
+              <p class="result-meta">Used for every download below. The extension is added for you.</p>
               <div id="downloads" class="downloads"></div>
               <section id="deletePanel" class="card delete-card hidden">
                 <div class="panel-header compact-header">

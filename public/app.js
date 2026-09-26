@@ -48,6 +48,9 @@ const elements = {
   compressionMode: document.getElementById("compressionMode"),
   compressionBitrate: document.getElementById("compressionBitrate"),
   compressionHint: document.getElementById("compressionHint"),
+  dropZone: document.getElementById("dropZone"),
+  dropZoneFiles: document.getElementById("dropZoneFiles"),
+  exportFilename: document.getElementById("exportFilename"),
   cancelJobButton: document.getElementById("cancelJobButton"),
   historyList: document.getElementById("historyList"),
   refreshHistoryButton: document.getElementById("refreshHistoryButton"),
@@ -402,6 +405,134 @@ function beginTrace(totalBytes, fileCount, { compressing = false } = {}) {
 function markRetry(partNumber, attempt, message) {
   trace.retries.push({ partNumber, attempt, message, at: Date.now() });
   renderTrace();
+}
+
+/** Strips the extension and anything a file system would object to, leaving a usable stem. */
+function fileNameStem(name) {
+  return String(name || "")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .trim()
+    .slice(0, 120);
+}
+
+/**
+ * Seeds the export name from the recording, unless it has been edited.
+ *
+ * Retyping a name for every format would be tedious, and silently overwriting an edited one with
+ * each re-render would be worse, so the box is only refilled when it still holds what this code
+ * put there.
+ */
+function syncExportFilename(job) {
+  const input = elements.exportFilename;
+  if (!input) {
+    return;
+  }
+  const suggested = fileNameStem(job?.source_label) || "transcript";
+  const untouched = !input.value || input.value === input.dataset.suggested;
+  if (untouched) {
+    input.value = suggested;
+  }
+  input.dataset.suggested = suggested;
+}
+
+/** The stem every download uses, falling back to the suggestion if the box was emptied. */
+function exportStem() {
+  const input = elements.exportFilename;
+  const typed = fileNameStem(input?.value);
+  return typed || input?.dataset.suggested || "transcript";
+}
+
+/** Lists the chosen files under the drop zone, so a drop visibly took effect. */
+function renderChosenFiles() {
+  if (!elements.dropZoneFiles) {
+    return;
+  }
+  const files = [...(elements.fileInput?.files ?? [])];
+  if (!files.length) {
+    elements.dropZoneFiles.textContent = "";
+    return;
+  }
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  elements.dropZoneFiles.textContent =
+    files.length === 1
+      ? `${files[0].name} — ${formatBytes(files[0].size)}`
+      : `${files.length} files — ${formatBytes(total)}`;
+}
+
+/**
+ * Wires dropping files onto the zone.
+ *
+ * The dropped files are assigned to the file input rather than held separately, so submission,
+ * the compression hint and the size guard all keep reading one source of truth.
+ */
+function setupDropZone() {
+  const zone = elements.dropZone;
+  const input = elements.fileInput;
+  if (!zone || !input) {
+    return;
+  }
+
+  let depth = 0;
+  const setDragging = (on) => zone.classList.toggle("is-dragging", on);
+
+  // dragover must be cancelled or the browser navigates to the file instead of dropping it.
+  zone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+  });
+  zone.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    depth++;
+    setDragging(true);
+  });
+  // Counted rather than toggled: dragging over a child fires leave on the parent.
+  zone.addEventListener("dragleave", () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) {
+      setDragging(false);
+    }
+  });
+
+  zone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    depth = 0;
+    setDragging(false);
+
+    const dropped = [...(event.dataTransfer?.files ?? [])].filter((file) => file.size > 0);
+    if (!dropped.length) {
+      setStatus(elements.formStatus, "That did not contain a file. Drop an audio or video file.", "error");
+      return;
+    }
+
+    const transfer = new DataTransfer();
+    for (const file of dropped) {
+      transfer.items.add(file);
+    }
+    input.files = transfer.files;
+    // Assigning files does not fire change, so everything watching the input is told directly.
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    setStatus(elements.formStatus, "");
+  });
+
+  // Keyboard users get the picker too, since the zone is focusable.
+  zone.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      input.click();
+    }
+  });
+
+  // A page-wide guard, or a file dropped just outside the zone replaces the whole app with it.
+  for (const type of ["dragover", "drop"]) {
+    window.addEventListener(type, (event) => {
+      if (!zone.contains(event.target)) {
+        event.preventDefault();
+      }
+    });
+  }
 }
 
 /** Says what will happen to the chosen files before the button is pressed. */
@@ -1049,14 +1180,16 @@ function renderExportControls(target, job, named) {
   }
 
   const speakerNames = named ? job.speaker_name_map || {} : null;
-  const stem = named ? "named-transcript" : "transcript";
+  // Read when the button is pressed rather than captured here, so an edit made after the panel
+  // rendered is the one that takes effect.
+  const stemFor = () => (named ? `${exportStem()}-named` : exportStem());
 
   // Every control is a button so the save location can be chosen; a plain link would go
   // straight to the download folder.
   const definitions = [
     ...(named
       ? []
-      : [{ label: "Raw JSON", run: () => window.Exporters.downloadRaw(job.transcript_url, `${stem}.json`) }]),
+      : [{ label: "Raw JSON", run: () => window.Exporters.downloadRaw(job.transcript_url, `${stemFor()}.json`) }]),
     ...window.Exporters.FORMATS.map((definition) => ({
       label: named ? `Named ${definition.label}` : definition.label,
       run: () =>
@@ -1065,7 +1198,7 @@ function renderExportControls(target, job, named) {
           job.transcript_response,
           speakerNames,
           job.export_metadata || {},
-          stem
+          stemFor()
         ),
     })),
   ];
@@ -1248,6 +1381,11 @@ function clearResults({ title, body } = {}) {
   elements.metadataGrid.innerHTML = "";
   elements.downloads.innerHTML = "";
   elements.namedDownloads.innerHTML = "";
+  // Cleared so the next job seeds its own name rather than inheriting the last one's edit.
+  if (elements.exportFilename) {
+    elements.exportFilename.value = "";
+    delete elements.exportFilename.dataset.suggested;
+  }
   elements.transcriptText.textContent = "";
   elements.namedTranscriptText.textContent = "";
   elements.timelineEntries.innerHTML = "";
@@ -1352,6 +1490,7 @@ async function renderJob(job) {
     elements.transcriptText.textContent = `${job.status_detail || "The transcription is still in progress."}\n\nThis batch endpoint does not expose a true percent-complete value, so the app tracks job stages and elapsed time instead.`;
   }
 
+  syncExportFilename(job);
   renderExportControls(elements.downloads, job, false);
   renderTimeline(
     job.timeline_entries,
@@ -1933,7 +2072,11 @@ elements.transcriptionForm.addEventListener("submit", async (event) => {
 window.addEventListener("DOMContentLoaded", async () => {
   updateSourcePanels();
   syncControls();
-  elements.fileInput?.addEventListener("change", refreshCompressionHint);
+  setupDropZone();
+  elements.fileInput?.addEventListener("change", () => {
+    renderChosenFiles();
+    refreshCompressionHint();
+  });
   elements.compressionMode?.addEventListener("change", refreshCompressionHint);
   elements.compressionBitrate?.addEventListener("change", refreshCompressionHint);
   refreshCompressionHint();

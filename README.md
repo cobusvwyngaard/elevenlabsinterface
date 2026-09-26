@@ -152,6 +152,27 @@ A job ElevenLabs has accepted is given 45 minutes before the stale sweep gives u
 than the 20 a job that never got that far gets. Judged by the same clock, the sweep would declare
 a transcription still in progress dead and stop collecting it.
 
+## Choosing files, and naming what comes out
+
+Files can be dropped onto the upload area as well as chosen from it. A drop assigns the files to
+the file input rather than keeping its own copy, so submission, the compression hint and the size
+guard all keep reading one source of truth, and a `change` event is dispatched by hand because
+assigning `files` does not fire one. `dragover` and `drop` are cancelled page-wide outside the
+zone as well: a file dropped slightly wide of it would otherwise replace the whole app.
+
+Exports are named from a **Saved file name** box, seeded with the recording's own name without its
+extension. It is only reseeded while it still holds what was put there, so an edit survives the
+panel re-rendering, and it is cleared when a new job starts rather than inheriting the previous
+job's edit. The name is read when a download button is pressed, not when the panel rendered, so an
+edit made in between is the one that takes effect. Named-speaker exports get a `-named` suffix so
+they cannot silently overwrite the plain ones.
+
+Every download opens a **Save As** dialog so the folder can be chosen, which is why each control
+is a button rather than a link: a link goes straight to the download folder. `showSaveFilePicker`
+needs the click's transient user activation, so it is called before the file contents are built —
+awaiting a DOCX or PDF build first would spend the activation and the dialog would never appear.
+Where the API is unavailable (Firefox, Safari) it falls back to a plain download.
+
 ## Diagnosing a failed job
 
 Three places record what happened, because they fail in different ways.
