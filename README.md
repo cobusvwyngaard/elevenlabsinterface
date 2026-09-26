@@ -81,13 +81,24 @@ it to mono Opus before anything is uploaded, chosen with **Compress before uploa
 
 | Mode | Behaviour |
 | --- | --- |
-| Only when the file is too large | The default. Small files are uploaded untouched. |
+| Only when the file is too large | The default. Small audio files are uploaded untouched; **video is always converted**, whatever its size. |
 | Always | Re-encodes everything, which also shortens the upload. |
 | Never | Uploads the original, and refuses anything over the limit. |
 
 Measured on a 2.5 hour, 139.1 MB AAC recording: **52.6 MB out, in 100 seconds** — about 90x
 realtime, and roughly 22 MB per hour of audio at the default 48 kbps. The fixture was pink and
 brown noise, which is close to the worst case for Opus; speech compresses further.
+
+A video is converted even when it would have fitted. Only the audio track is transcribed, so the
+video is bytes uploaded and waited on that nothing will ever read: an MP4 fixture of 2.2 MB comes
+out at 359 KB with a single Opus stream and no video in it. MP4, MOV and M4V are read a piece at a
+time, so length is no obstacle; WebM, MKV and the rest go through the browser's whole-file decoder
+instead, which is refused above 25 minutes because the memory it needs follows duration rather than
+file size — 64 MB of 32 kbps mono is over four hours, and several gigabytes of PCM.
+
+When a conversion cannot be done but the file already fits, it is uploaded unconverted and the
+reason is shown, rather than failing. Converting video is a saving, not a requirement, and it must
+not turn a job that would have worked into one that does not.
 
 On quality: the published work on Opus and speech recognition puts word error rate a percentage
 point above clean speech at 6 kbps and converging on it well below 32 kbps, so 48 kbps mono is

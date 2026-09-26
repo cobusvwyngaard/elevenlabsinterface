@@ -298,8 +298,8 @@ const STALL_AFTER_MS = 20000;
 // Ordered pipeline. Client stages are observed in the browser; server stages arrive on the
 // job record. Without this, a slow upload and a dead connection look identical.
 const TRACE_STEPS = [
-  { key: "compressing", label: "Compressing on this computer", side: "client" },
-  { key: "compression_done", label: "Compressed", side: "client" },
+  { key: "compressing", label: "Converting on this computer", side: "client" },
+  { key: "compression_done", label: "Converted", side: "client" },
   { key: "uploading", label: "Uploading to Cloudflare", side: "client" },
   { key: "accepted", label: "Accepted by Cloudflare", side: "client" },
   { key: "audio_stored", label: "Audio saved to storage", side: "server" },
@@ -377,7 +377,7 @@ function beginTrace(totalBytes, fileCount, { compressing = false } = {}) {
   setStatus(
     elements.formStatus,
     {
-      compressing: "Compressing on this computer...",
+      compressing: "Converting on this computer...",
       uploading: "Uploading to Cloudflare...",
       submitting: "Submitting the job...",
     }[phase]
@@ -574,11 +574,16 @@ function refreshCompressionHint() {
   // until the file is decoded, so this is quoted per hour rather than as a total.
   const bitrate = Number(elements.compressionBitrate?.value) || 48000;
   const mbPerHour = ((bitrate / 8) * 3600) / 1e6;
+  const videos = planned.filter((file) => window.AudioCompressor?.isVideo?.(file)).length;
+  const videoNote = videos
+    ? ` The video track${videos === 1 ? "" : "s"} ${videos === 1 ? "is" : "are"} discarded, since ` +
+      "only the audio is transcribed."
+    : "";
   setStatus(
     elements.compressionHint,
     `${planned.length} file${planned.length === 1 ? "" : "s"} will be re-encoded to mono Opus at ` +
       `${bitrate / 1000} kbps first: about ${mbPerHour.toFixed(0)} MB per hour of audio, and ` +
-      `roughly a minute of processing per 90 minutes of recording.`
+      `roughly a minute of processing per 90 minutes of recording.${videoNote}`
   );
 }
 
@@ -601,7 +606,11 @@ function compressionPlanFor(file, limitBytes) {
   if (mode === "off") {
     return { compress: false };
   }
-  if (mode === "auto" && file.size <= limitBytes) {
+  // A video is always worth reducing, whatever its size. Transcription reads only the audio
+  // track, so the video is bytes spent uploading something nothing will ever look at, and
+  // dropping it costs no transcription quality at all.
+  const video = window.AudioCompressor?.isVideo?.(file) ?? false;
+  if (mode === "auto" && file.size <= limitBytes && !video) {
     return { compress: false };
   }
   const support = window.AudioCompressor?.canCompress?.(file);
@@ -609,7 +618,7 @@ function compressionPlanFor(file, limitBytes) {
     // In "auto" this file was already too big, so the reason has to reach the user either way.
     return { compress: false, unavailable: support?.reason ?? "Compression is not available here." };
   }
-  return { compress: true, bitrate: Number(elements.compressionBitrate?.value) || 48000 };
+  return { compress: true, bitrate: Number(elements.compressionBitrate?.value) || 48000, video };
 }
 
 /** Re-encodes the selected files, reporting progress against the whole set rather than each one. */
@@ -629,16 +638,35 @@ async function compressFiles(files, limitBytes) {
     }
 
     const position = index;
-    const outcome = await window.AudioCompressor.compress(file, {
-      bitrate: plan.bitrate,
-      onProgress: (fraction) => {
-        const overall = (position + fraction) / files.length;
-        updateClientStage(
-          "compressing",
-          `${Math.round(overall * 100)}% of ${files.length} file${files.length === 1 ? "" : "s"}`
+    let outcome;
+    try {
+      outcome = await window.AudioCompressor.compress(file, {
+        bitrate: plan.bitrate,
+        onProgress: (fraction) => {
+          const overall = (position + fraction) / files.length;
+          updateClientStage(
+            "compressing",
+            `${Math.round(overall * 100)}% of ${files.length} file${files.length === 1 ? "" : "s"}`
+          );
+        },
+      });
+    } catch (error) {
+      // Converting is only required to get a file under the limit. A file that already fits is
+      // uploaded as it is rather than failed, which matters for video: it is converted even when
+      // small, and that convenience must not turn a job that would have worked into one that does
+      // not.
+      if (file.size <= limitBytes) {
+        setStatus(
+          elements.compressionHint,
+          `${file.name} could not be converted, so it is being uploaded as it is. ${error.message}`,
+          "error"
         );
-      },
-    });
+        results.push(file);
+        index++;
+        continue;
+      }
+      throw error;
+    }
 
     results.push(outcome.file);
     setStatus(
@@ -943,7 +971,7 @@ function uploadSummary() {
   // is deliberately not quoted while compressing, because the figure to hand is the one before
   // compression and is not what will be sent.
   if (!trace.uploadStartedAt) {
-    return trace.compressing ? "Waiting for compression to finish" : `Waiting for ${formatBytes(totalBytes)}`;
+    return trace.compressing ? "Waiting for the conversion to finish" : `Waiting for ${formatBytes(totalBytes)}`;
   }
 
   const percent = Math.min(100, Math.round((uploadedBytes / totalBytes) * 100));

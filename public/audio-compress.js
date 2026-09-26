@@ -12,14 +12,26 @@
 (function (global) {
   "use strict";
 
-  const MP4_EXTENSIONS = /\.(m4a|m4b|mp4|mov|m4v|aac)$/i;
-  const MP4_TYPES = /^(audio|video)\/(mp4|x-m4a|m4a|quicktime|aac)/i;
+  const MP4_EXTENSIONS = /\.(m4a|m4b|mp4|mov|m4v|aac|3gp|3g2)$/i;
+  const MP4_TYPES = /^(audio|video)\/(mp4|x-m4a|m4a|quicktime|aac|3gpp)/i;
+
+  const VIDEO_EXTENSIONS = /\.(mp4|mov|m4v|webm|mkv|avi|wmv|flv|mpg|mpeg|3gp|3g2|ts|m2ts)$/i;
 
   // Above this, decoding the whole file into memory is not safe, so a demuxer is required.
   const WHOLE_FILE_DECODE_LIMIT = 64 * 1024 * 1024;
 
   /** Keeps the encoder fed without letting an unbounded queue accumulate in memory. */
   const MAX_QUEUE = 16;
+
+  /**
+   * How much decoded audio the whole-file path may hold.
+   *
+   * That path decodes everything before re-encoding, and the cost is set by duration rather than
+   * by file size: 64 MB of 32 kbps mono is over four hours, which at 48kHz stereo float is several
+   * gigabytes of PCM and would take the tab with it. Duration is read from the file's metadata
+   * first, which is cheap, so an unreasonable one is refused instead of attempted.
+   */
+  const MAX_WHOLE_FILE_DECODE_SECONDS = 25 * 60;
 
   let mp4boxPromise = null;
 
@@ -62,6 +74,17 @@
     return MP4_EXTENSIONS.test(file.name) || MP4_TYPES.test(file.type || "");
   }
 
+  /**
+   * Whether this file carries video.
+   *
+   * Worth knowing even for a small file: transcription only ever reads the audio track, so the
+   * video is bytes uploaded and paid for in time that nothing will look at. Re-encoding a video
+   * to audio is not really a compromise, it is dropping something that was never wanted.
+   */
+  function isVideo(file) {
+    return /^video\//i.test(file.type || "") || VIDEO_EXTENSIONS.test(file.name);
+  }
+
   /** Says whether this file can be compressed at all, and why not when it cannot. */
   function canCompress(file) {
     if (!isSupported()) {
@@ -76,6 +99,30 @@
         "Files this large can only be compressed from an MP4 container (.m4a, .mp4, .mov). " +
         "Convert the recording first, or upload it as it is.",
     };
+  }
+
+  /**
+   * Reads a file's duration from its metadata, without decoding it.
+   *
+   * Used to decide whether the whole-file path can afford to decode this at all. Returns null when
+   * the browser cannot tell, which is treated as unknown rather than as safe.
+   */
+  function probeDuration(file) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const media = document.createElement(isVideo(file) ? "video" : "audio");
+      const done = (value) => {
+        media.removeAttribute("src");
+        URL.revokeObjectURL(url);
+        resolve(value);
+      };
+      media.preload = "metadata";
+      media.onloadedmetadata = () => done(Number.isFinite(media.duration) ? media.duration : null);
+      media.onerror = () => done(null);
+      // Metadata should be near-instant; not waiting forever on a format it cannot read.
+      setTimeout(() => done(null), 8000);
+      media.src = url;
+    });
   }
 
   function waitForDrain(target, property) {
@@ -325,6 +372,15 @@
 
   /** For formats without a demuxer here: let the browser decode the lot, then re-encode it. */
   async function compressWholeFile(file, options) {
+    const seconds = await probeDuration(file);
+    if (seconds !== null && seconds > MAX_WHOLE_FILE_DECODE_SECONDS) {
+      throw new Error(
+        `This is ${Math.round(seconds / 60)} minutes of ${file.name.split(".").pop()?.toUpperCase()}, ` +
+          "which has to be decoded all at once and would run the browser out of memory. " +
+          "Convert it to MP4, M4A or MOV first, which can be read a piece at a time."
+      );
+    }
+
     const context = new OfflineAudioContext(1, 1, 48000);
     let buffer;
     try {
@@ -409,5 +465,5 @@
     };
   }
 
-  global.AudioCompressor = { isSupported, canCompress, compress };
+  global.AudioCompressor = { isSupported, canCompress, compress, isVideo, probeDuration };
 })(window);
