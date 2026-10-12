@@ -883,3 +883,63 @@ textarea {
 .export-name-field {
   margin-bottom: 6px;
 }
+
+/* The login gate. A full-page cover rather than a separate route, so there is one page to load
+   and no way to land on the app with no session and a half-rendered shell. */
+.login-gate {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px 16px;
+}
+
+.login-gate.hidden {
+  display: none;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 32px 28px;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 1.45rem;
+}
+
+.login-copy,
+.login-footnote {
+  margin: 0;
+  color: var(--muted);
+}
+
+.login-footnote {
+  font-size: 0.88rem;
+}
+
+.login-card form {
+  display: grid;
+  gap: 14px;
+}
+
+.signed-in-as {
+  margin: 10px 0 0;
+  font-size: 0.92rem;
+  color: var(--muted);
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+}

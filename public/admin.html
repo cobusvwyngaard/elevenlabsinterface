@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Workbench administration</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>%F0%9F%94%91</text></svg>">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero card">
+        <div>
+          <p class="eyebrow">Administration</p>
+          <h1>Access codes</h1>
+          <p class="hero-copy">
+            Each person gets an access code linked to their own ElevenLabs API key. Their
+            transcripts and history are visible only to them.
+          </p>
+        </div>
+      </header>
+
+      <!-- First run only. Disappears for good once an admin code exists. -->
+      <section id="claimPanel" class="card hidden">
+        <div class="panel-header">
+          <div>
+            <h2>Claim this deployment</h2>
+            <p class="result-meta">
+              No admin code is set yet. Claiming it requires showing the deployment is yours.
+            </p>
+          </div>
+        </div>
+        <form id="claimForm" autocomplete="off">
+          <label class="field">
+            <span>Choose an admin code (at least 12 characters)</span>
+            <input id="claimCode" type="password" autocomplete="new-password" required>
+          </label>
+          <label class="field">
+            <span>Name for your own account</span>
+            <input id="claimLabel" type="text" value="Owner" required>
+          </label>
+          <label class="field hidden" id="keyProofField">
+            <span>Last 4 characters of the ElevenLabs key already saved here</span>
+            <input id="claimKeyTail" type="text" maxlength="4" autocomplete="off" spellcheck="false">
+          </label>
+          <button class="primary-button" type="submit">Claim</button>
+        </form>
+        <p id="claimStatus" class="status-message"></p>
+      </section>
+
+      <section id="adminPanel" class="card hidden">
+        <div class="panel-header">
+          <div>
+            <h2>Accounts</h2>
+            <p class="result-meta">The admin code is asked for on every action and never stored here.</p>
+          </div>
+        </div>
+
+        <label class="field">
+          <span>Admin code</span>
+          <input id="adminCode" type="password" autocomplete="current-password">
+        </label>
+
+        <form id="createForm" autocomplete="off">
+          <label class="field">
+            <span>Person's name</span>
+            <input id="newLabel" type="text" placeholder="e.g. Research assistant" required>
+          </label>
+          <label class="field">
+            <span>Their ElevenLabs API key</span>
+            <input id="newKey" type="password" autocomplete="off" required>
+          </label>
+          <button class="primary-button" type="submit">Create account</button>
+        </form>
+
+        <div id="newCode" class="hidden"></div>
+        <p id="adminStatus" class="status-message"></p>
+        <div id="accountList"></div>
+      </section>
+    </div>
+    <script src="/admin.js" defer></script>
+  </body>
+</html>

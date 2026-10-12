@@ -51,6 +51,14 @@ const elements = {
   dropZone: document.getElementById("dropZone"),
   dropZoneFiles: document.getElementById("dropZoneFiles"),
   exportFilename: document.getElementById("exportFilename"),
+  loginGate: document.getElementById("loginGate"),
+  loginForm: document.getElementById("loginForm"),
+  loginIdentifier: document.getElementById("loginIdentifier"),
+  loginButton: document.getElementById("loginButton"),
+  loginStatus: document.getElementById("loginStatus"),
+  appShell: document.getElementById("appShell"),
+  accountLabel: document.getElementById("accountLabel"),
+  signOutButton: document.getElementById("signOutButton"),
   cancelJobButton: document.getElementById("cancelJobButton"),
   historyList: document.getElementById("historyList"),
   refreshHistoryButton: document.getElementById("refreshHistoryButton"),
@@ -405,6 +413,97 @@ function beginTrace(totalBytes, fileCount, { compressing = false } = {}) {
 function markRetry(partNumber, attempt, message) {
   trace.retries.push({ partNumber, attempt, message, at: Date.now() });
   renderTrace();
+}
+
+/**
+ * Everything the app does needs a session, so startup is split in two: show the gate, and only
+ * load anything once there is somebody to load it for.
+ */
+async function startApp() {
+  elements.loginGate?.classList.add("hidden");
+  elements.appShell?.classList.remove("hidden");
+
+  try {
+    const settings = await loadSettings();
+    if (settings.api_key_saved) {
+      await loadUsage({ silent: true });
+    } else {
+      resetUsagePanel("This account has no API key set. Ask for one to be added.");
+    }
+    await loadJobs();
+    if (state.activeJobId && state.jobs.some((job) => job.job_id === state.activeJobId && !job.is_terminal)) {
+      startPolling(state.activeJobId);
+    }
+  } catch (error) {
+    setStatus(elements.formStatus, error.message, "error");
+  }
+}
+
+function showGate(message, tone) {
+  elements.appShell?.classList.add("hidden");
+  elements.loginGate?.classList.remove("hidden");
+  if (message) {
+    setStatus(elements.loginStatus, message, tone ?? "");
+  }
+}
+
+/** Reads the session and decides which of the two views the page is. */
+async function resolveSession() {
+  let session = { signed_in: false };
+  try {
+    session = await fetchJson("/api/session");
+  } catch {
+    // Treated as signed out: the gate is the safe thing to show when this cannot be answered.
+  }
+
+  if (!session.signed_in) {
+    showGate();
+    return;
+  }
+  if (elements.accountLabel) {
+    elements.accountLabel.textContent = session.label || "this account";
+  }
+  await startApp();
+}
+
+function setupLogin() {
+  elements.loginForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const identifier = elements.loginIdentifier?.value ?? "";
+    if (!identifier.trim()) {
+      setStatus(elements.loginStatus, "Enter your access code.", "error");
+      return;
+    }
+    elements.loginButton.disabled = true;
+    setStatus(elements.loginStatus, "Checking...");
+    try {
+      const session = await fetchJson("/api/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier }),
+      });
+      // Cleared immediately: the code is a credential and does not want to sit in a form field.
+      elements.loginIdentifier.value = "";
+      setStatus(elements.loginStatus, "");
+      if (elements.accountLabel) {
+        elements.accountLabel.textContent = session.label || "this account";
+      }
+      await startApp();
+    } catch (error) {
+      setStatus(elements.loginStatus, error.message || "Could not sign in.", "error");
+    } finally {
+      elements.loginButton.disabled = false;
+    }
+  });
+
+  elements.signOutButton?.addEventListener("click", async () => {
+    try {
+      await fetch("/api/session", { method: "DELETE" });
+    } catch {
+      // The cookie is the session, so reloading onto the gate is the outcome either way.
+    }
+    window.location.reload();
+  });
 }
 
 /** Strips the extension and anything a file system would object to, leaving a usable stem. */
@@ -837,6 +936,11 @@ async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
+    // A session that ran out mid-use would otherwise surface as "Sign in to continue" attached to
+    // whatever the user happened to be doing. The gate is the only sensible place to end up.
+    if (response.status === 401 && !url.startsWith("/api/session")) {
+      window.dispatchEvent(new Event("workbench:unauthorised"));
+    }
     throw new Error(payload.detail || "Request failed.");
   }
   return payload;
@@ -2108,18 +2212,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   elements.compressionMode?.addEventListener("change", refreshCompressionHint);
   elements.compressionBitrate?.addEventListener("change", refreshCompressionHint);
   refreshCompressionHint();
-  try {
-    const settings = await loadSettings();
-    if (settings.api_key_saved) {
-      await loadUsage({ silent: true });
-    } else {
-      resetUsagePanel("Save an API key to load usage.");
-    }
-    await loadJobs();
-    if (state.activeJobId && state.jobs.some((job) => job.job_id === state.activeJobId && !job.is_terminal)) {
-      startPolling(state.activeJobId);
-    }
-  } catch (error) {
-    setStatus(elements.formStatus, error.message, "error");
-  }
+  setupLogin();
+  await resolveSession();
+});
+
+/** Kept so a session that expires mid-use returns to the gate rather than failing silently. */
+window.addEventListener("workbench:unauthorised", () => {
+  showGate("Your session ended. Sign in again.", "error");
 });

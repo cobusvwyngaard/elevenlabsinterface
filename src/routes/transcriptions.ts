@@ -21,7 +21,7 @@ interface UploadRef {
  * only references the stored object, so job submission stays far below the 100 MB body limit.
  */
 transcriptionRoutes.post("/api/transcriptions", async (c) => {
-  const { keyStore, service } = services(c);
+  const { keyStore, service } = await services(c);
   await requireApiKey(keyStore, "starting a transcription");
 
   const body = await c.req.json<Record<string, unknown>>().catch(() => null);
@@ -134,7 +134,7 @@ transcriptionRoutes.post("/api/transcriptions", async (c) => {
 });
 
 transcriptionRoutes.get("/api/usage", async (c) => {
-  const { keyStore } = services(c);
+  const { keyStore } = await services(c);
   const apiKey = await requireApiKey(keyStore, "loading usage");
   const client = new ElevenLabsClient(c.env.ELEVENLABS_API_URL);
 

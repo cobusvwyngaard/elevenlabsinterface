@@ -7,7 +7,7 @@ import { httpError, requireApiKey, requireJob, services, translateError, type Ap
 export const jobRoutes = new Hono<AppContext>();
 
 jobRoutes.get("/api/jobs", async (c) => {
-  const { repository, service } = services(c);
+  const { repository, service } = await services(c);
   const includeHidden = c.req.query("include_hidden") === "true";
 
   let records = await repository.listJobs();
@@ -27,7 +27,7 @@ jobRoutes.get("/api/jobs", async (c) => {
 
 // Declared before the /:job_id routes so "audit-remote" is not read as a job id.
 jobRoutes.post("/api/jobs/audit-remote", async (c) => {
-  const { repository, keyStore, service } = services(c);
+  const { repository, keyStore, service } = await services(c);
   const apiKey = await requireApiKey(keyStore, "auditing remote data");
 
   const records = await repository.listJobs();
@@ -53,13 +53,13 @@ jobRoutes.post("/api/jobs/audit-remote", async (c) => {
 });
 
 jobRoutes.get("/api/jobs/:job_id", async (c) => {
-  const { repository, service } = services(c);
+  const { repository, service } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
   return c.json(await service.detailFor(record));
 });
 
 jobRoutes.post("/api/jobs/:job_id/verify-remote", async (c) => {
-  const { repository, keyStore, service } = services(c);
+  const { repository, keyStore, service } = await services(c);
   const apiKey = await requireApiKey(keyStore, "verifying remote data");
   const record = await requireJob(repository, c.req.param("job_id"));
   const updated = await service.verifyRemoteRecord(record, apiKey);
@@ -67,7 +67,7 @@ jobRoutes.post("/api/jobs/:job_id/verify-remote", async (c) => {
 });
 
 jobRoutes.post("/api/jobs/:job_id/visibility", async (c) => {
-  const { repository, service } = services(c);
+  const { repository, service } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
   if (!isTerminal(record)) {
     throw httpError(409, "Finish or cancel the job before hiding it from Recent Jobs.");
@@ -84,14 +84,14 @@ jobRoutes.post("/api/jobs/:job_id/visibility", async (c) => {
 });
 
 jobRoutes.post("/api/jobs/:job_id/cancel", async (c) => {
-  const { repository, service } = services(c);
+  const { repository, service } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
   const updated = await service.cancelJob(record);
   return c.json(await service.detailFor(updated));
 });
 
 jobRoutes.post("/api/jobs/:job_id/delete", async (c) => {
-  const { repository, keyStore, service } = services(c);
+  const { repository, keyStore, service } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
   if (!isTerminal(record)) {
     throw httpError(409, "Wait for the job to finish or cancel it before deleting.");
@@ -147,7 +147,7 @@ jobRoutes.post("/api/jobs/:job_id/delete", async (c) => {
 });
 
 jobRoutes.post("/api/jobs/:job_id/speaker-names", async (c) => {
-  const { repository, service } = services(c);
+  const { repository, service } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
 
   const body = await c.req
@@ -165,7 +165,7 @@ jobRoutes.post("/api/jobs/:job_id/speaker-names", async (c) => {
 });
 
 jobRoutes.delete("/api/jobs/:job_id/speaker-names", async (c) => {
-  const { repository, service } = services(c);
+  const { repository, service } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
   const updated = await service.clearSpeakerNames(record);
   return c.json(await service.detailFor(updated));

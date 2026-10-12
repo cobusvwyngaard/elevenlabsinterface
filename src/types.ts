@@ -96,6 +96,8 @@ export interface EffectiveSettings {
 }
 
 export interface JobRecord {
+  /** Which account owns this job. Null only for rows written before accounts existed. */
+  account_id?: string | null;
   job_id: string;
   transcription_id: string | null;
   created_at: string;

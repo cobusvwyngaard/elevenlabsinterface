@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { AccountStore } from "../accounts";
 import { MAX_DIRECT_UPLOAD_BYTES, MAX_LINKED_UPLOAD_BYTES } from "../constants";
 import { presignConfigured } from "../presign";
 import {
@@ -16,7 +17,7 @@ import { httpError, services, type AppContext } from "./deps";
 export const settingsRoutes = new Hono<AppContext>();
 
 settingsRoutes.get("/api/settings", async (c) => {
-  const { repository, keyStore } = services(c);
+  const { repository, keyStore } = await services(c);
   const apiKey = await keyStore.getKey();
   const [defaults, presets] = await Promise.all([
     repository.getLastUsedDefaults(),
@@ -41,30 +42,32 @@ settingsRoutes.get("/api/settings", async (c) => {
   });
 });
 
+// The key belongs to whoever is signed in, and so does the right to replace it: the credits
+// spent are theirs. It is written to their own account row, never to a shared one.
 settingsRoutes.post("/api/settings/api-key", async (c) => {
-  const { keyStore } = services(c);
+  const { account } = await services(c);
   const body = await c.req.json<{ api_key?: string }>().catch(() => ({}) as { api_key?: string });
   const apiKey = (body.api_key ?? "").trim();
   if (!apiKey) {
     throw httpError(400, "Enter an ElevenLabs API key.");
   }
-  await keyStore.saveKey(apiKey);
+  await new AccountStore(c.env.DB).setApiKey(account.account_id, apiKey);
   return c.json({ saved: true, masked: maskKey(apiKey) });
 });
 
 settingsRoutes.delete("/api/settings/api-key", async (c) => {
-  const { keyStore } = services(c);
-  await keyStore.removeKey();
+  const { account } = await services(c);
+  await new AccountStore(c.env.DB).setApiKey(account.account_id, "");
   return c.json({ saved: false, masked: null });
 });
 
 settingsRoutes.get("/api/keyterm-presets", async (c) => {
-  const { repository } = services(c);
+  const { repository } = await services(c);
   return c.json({ presets: await repository.getKeytermPresets() });
 });
 
 settingsRoutes.post("/api/keyterm-presets", async (c) => {
-  const { repository } = services(c);
+  const { repository } = await services(c);
   const body = await c.req
     .json<{ name?: string; terms?: string[] | string }>()
     .catch(() => ({}) as { name?: string; terms?: string[] | string });
@@ -91,7 +94,7 @@ settingsRoutes.post("/api/keyterm-presets", async (c) => {
 });
 
 settingsRoutes.delete("/api/keyterm-presets/:name", async (c) => {
-  const { repository } = services(c);
+  const { repository } = await services(c);
   const name = decodeURIComponent(c.req.param("name")).toLowerCase();
   const presets = await repository.getKeytermPresets();
   const next = presets.filter((preset) => preset.name.toLowerCase() !== name);

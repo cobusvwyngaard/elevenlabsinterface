@@ -8,7 +8,28 @@
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div class="shell">
+    <!-- The gate. Shown until a session exists, and the app shell stays hidden behind it. -->
+    <div id="loginGate" class="login-gate">
+      <section class="login-card card">
+        <h1>Transcription Workbench</h1>
+        <p class="login-copy">Enter your access code to continue.</p>
+        <form id="loginForm" autocomplete="off">
+          <label class="field">
+            <span>Access code</span>
+            <input id="loginIdentifier" type="password" inputmode="text" autocomplete="off"
+                   spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" required>
+          </label>
+          <button id="loginButton" class="primary-button" type="submit">Sign in</button>
+        </form>
+        <p id="loginStatus" class="status-message"></p>
+        <p class="login-footnote">
+          Codes are issued by whoever runs this deployment. Lost yours? Ask for a new one —
+          it cannot be looked up.
+        </p>
+      </section>
+    </div>
+
+    <div class="shell hidden" id="appShell">
       <header class="hero card">
         <div>
           <p class="eyebrow">Transcription studio</p>
@@ -16,6 +37,10 @@
           <p class="hero-copy">
             Run batch transcriptions from a clean UI, keep your API key server-side,
             and reopen prior jobs whenever you need them.
+          </p>
+          <p class="signed-in-as">
+            Signed in as <strong id="accountLabel">—</strong>
+            <button id="signOutButton" class="link-button" type="button">Sign out</button>
           </p>
         </div>
         <div class="hero-stats">

@@ -1,13 +1,16 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { TERMINAL_JOB_STATUSES } from "./constants";
+import { AccountStore } from "./accounts";
 import { JobRepository } from "./db";
 import { JobService } from "./jobs";
 import { KeyStore } from "./keyStore";
 import { recordEvent } from "./log";
+import { adminRoutes } from "./routes/admin";
 import { diagnosticRoutes } from "./routes/diagnostics";
 import { downloadRoutes } from "./routes/downloads";
 import { jobRoutes } from "./routes/jobs";
+import { sessionRoutes } from "./routes/session";
 import { settingsRoutes } from "./routes/settings";
 import { transcriptionRoutes } from "./routes/transcriptions";
 import { uploadRoutes } from "./routes/uploads";
@@ -18,6 +21,9 @@ const app = new Hono<AppContext>();
 
 app.get("/healthz", (c) => c.json({ status: "ok" }));
 
+// Session and admin first: they are the only routes that work without being signed in.
+app.route("/", sessionRoutes);
+app.route("/", adminRoutes);
 app.route("/", settingsRoutes);
 app.route("/", uploadRoutes);
 app.route("/", transcriptionRoutes);
@@ -74,6 +80,28 @@ async function handleDeadLetters(batch: MessageBatch<JobMessage>, env: Env): Pro
   }
 }
 
+/**
+ * Whose key pays for this job.
+ *
+ * Read from the job's own account rather than from anything global, so a job can only ever spend
+ * the credits of the account that started it. A job written before accounts existed has no account
+ * and falls back to the original single key.
+ */
+async function keyForJob(
+  env: Env,
+  repository: JobRepository,
+  accounts: AccountStore,
+  jobId: string
+): Promise<string | null> {
+  const record = await repository.getJob(jobId);
+  if (record?.account_id) {
+    const account = await accounts.findById(record.account_id);
+    const key = account?.api_key?.trim();
+    return key ? key : null;
+  }
+  return new KeyStore(repository).getKey();
+}
+
 export default {
   fetch: app.fetch,
 
@@ -83,13 +111,15 @@ export default {
       return;
     }
 
+    // Unscoped on purpose: the consumer has no session and works from a job id. Which account a
+    // job belongs to is read off the job itself, below, and that decides whose key is spent.
     const repository = new JobRepository(env.DB);
-    const keyStore = new KeyStore(repository);
+    const accounts = new AccountStore(env.DB);
     const service = new JobService(env, repository);
-    const apiKey = await keyStore.getKey();
 
     for (const message of batch.messages) {
       const jobId = message.body.job_id;
+      const apiKey = await keyForJob(env, repository, accounts, jobId);
       // Attempt number distinguishes a first run from a retry after a silent death.
       await recordEvent(env.DB, jobId, "info", "consumer.received", {
         kind: message.body.kind ?? "run",
@@ -102,7 +132,8 @@ export default {
         const record = await repository.getJob(jobId);
         if (record) {
           record.status = "error";
-          record.error_message = "Save an ElevenLabs API key before starting a transcription.";
+          record.error_message =
+            "The account that started this job no longer has an ElevenLabs API key set.";
           record.status_detail = "The transcription failed.";
           record.completed_at = new Date().toISOString();
           await repository.saveJob(record);

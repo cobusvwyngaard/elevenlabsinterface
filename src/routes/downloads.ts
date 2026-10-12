@@ -8,7 +8,7 @@ export const downloadRoutes = new Hono<AppContext>();
  * browser, so the Worker never renders a transcript.
  */
 downloadRoutes.get("/downloads/:job_id/json", async (c) => {
-  const { repository } = services(c);
+  const { repository } = await services(c);
   const record = await requireJob(repository, c.req.param("job_id"));
 
   if (!record.response_json_path) {

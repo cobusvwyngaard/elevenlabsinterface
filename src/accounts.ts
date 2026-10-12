@@ -1,0 +1,186 @@
+import type { Env } from "./types";
+
+/** Long enough that guessing is not a strategy, and in groups of four so it can be read aloud. */
+const IDENTIFIER_BYTES = 15;
+const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no O/0 or I/1, which get misread
+
+export interface Account {
+  account_id: string;
+  label: string;
+  api_key: string;
+  created_at: string;
+  last_seen_at: string | null;
+  disabled: number;
+}
+
+/**
+ * Hashes a login identifier.
+ *
+ * SHA-256 rather than a password hash on purpose: this is a long random value, not a human-chosen
+ * password, so there is no dictionary to slow an attacker down with and nothing for a work factor
+ * to buy. What matters is that the plaintext is never stored.
+ */
+export async function hashIdentifier(identifier: string): Promise<string> {
+  const normalised = normaliseIdentifier(identifier);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalised));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Spaces and case are forgiven, so a code read off a page still works. */
+export function normaliseIdentifier(identifier: string): string {
+  return String(identifier || "").replace(/[\s-]+/g, "").toUpperCase();
+}
+
+/** Generates an identifier for a new account, grouped for legibility. */
+export function generateIdentifier(): string {
+  const bytes = new Uint8Array(IDENTIFIER_BYTES);
+  crypto.getRandomValues(bytes);
+  const chars = [...bytes].map((b) => ALPHABET[b % ALPHABET.length]);
+  return chars.join("").replace(/(.{5})(?=.)/g, "$1-");
+}
+
+export class AccountStore {
+  constructor(private readonly db: D1Database) {}
+
+  async findByIdentifier(identifier: string): Promise<Account | null> {
+    const hash = await hashIdentifier(identifier);
+    const row = await this.db
+      .prepare(`SELECT * FROM accounts WHERE identifier_hash = ? AND disabled = 0`)
+      .bind(hash)
+      .first<Account>();
+    return row ?? null;
+  }
+
+  async findById(accountId: string): Promise<Account | null> {
+    const row = await this.db
+      .prepare(`SELECT * FROM accounts WHERE account_id = ?`)
+      .bind(accountId)
+      .first<Account>();
+    return row ?? null;
+  }
+
+  async touch(accountId: string): Promise<void> {
+    await this.db
+      .prepare(`UPDATE accounts SET last_seen_at = ? WHERE account_id = ?`)
+      .bind(new Date().toISOString(), accountId)
+      .run();
+  }
+
+  async list(): Promise<Omit<Account, "api_key">[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT account_id, label, created_at, last_seen_at, disabled
+         FROM accounts ORDER BY datetime(created_at) DESC`
+      )
+      .all<Omit<Account, "api_key">>();
+    return result.results ?? [];
+  }
+
+  /** Creates an account and returns the identifier, which is the only time it exists in plaintext. */
+  async create(label: string, apiKey: string): Promise<{ accountId: string; identifier: string }> {
+    const identifier = generateIdentifier();
+    const accountId = crypto.randomUUID();
+    await this.db
+      .prepare(
+        `INSERT INTO accounts (account_id, identifier_hash, label, api_key, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .bind(accountId, await hashIdentifier(identifier), label, apiKey, new Date().toISOString())
+      .run();
+    return { accountId, identifier };
+  }
+
+  async setApiKey(accountId: string, apiKey: string): Promise<void> {
+    await this.db
+      .prepare(`UPDATE accounts SET api_key = ? WHERE account_id = ?`)
+      .bind(apiKey, accountId)
+      .run();
+  }
+
+  async setDisabled(accountId: string, disabled: boolean): Promise<void> {
+    await this.db
+      .prepare(`UPDATE accounts SET disabled = ? WHERE account_id = ?`)
+      .bind(disabled ? 1 : 0, accountId)
+      .run();
+  }
+
+  /** Issues a fresh identifier for an account whose old one was lost or shared by accident. */
+  async rotateIdentifier(accountId: string): Promise<string> {
+    const identifier = generateIdentifier();
+    await this.db
+      .prepare(`UPDATE accounts SET identifier_hash = ? WHERE account_id = ?`)
+      .bind(await hashIdentifier(identifier), accountId)
+      .run();
+    return identifier;
+  }
+
+  async deleteAccount(accountId: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM accounts WHERE account_id = ?`).bind(accountId).run();
+  }
+
+  /** Claims rows written before accounts existed, so the first account keeps its own history. */
+  async adoptOrphanJobs(accountId: string): Promise<number> {
+    const result = await this.db
+      .prepare(`UPDATE jobs SET account_id = ? WHERE account_id IS NULL`)
+      .bind(accountId)
+      .run();
+    return result.meta?.changes ?? 0;
+  }
+}
+
+/** The cookie holding the identifier. HttpOnly so page scripts cannot read it back out. */
+export const SESSION_COOKIE = "wb_session";
+
+export function sessionCookie(identifier: string, secure: boolean): string {
+  const parts = [
+    `${SESSION_COOKIE}=${encodeURIComponent(identifier)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${60 * 60 * 24 * 30}`,
+  ];
+  if (secure) {
+    parts.push("Secure");
+  }
+  return parts.join("; ");
+}
+
+export function clearedCookie(secure: boolean): string {
+  const parts = [`${SESSION_COOKIE}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
+  if (secure) {
+    parts.push("Secure");
+  }
+  return parts.join("; ");
+}
+
+export function readSessionCookie(header: string | undefined): string | null {
+  if (!header) {
+    return null;
+  }
+  for (const part of header.split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === SESSION_COOKIE) {
+      const value = decodeURIComponent(rest.join("="));
+      return value || null;
+    }
+  }
+  return null;
+}
+
+/** Constant-time string compare, for the admin code where the secret is human-chosen. */
+export function sameSecret(a: string, b: string): boolean {
+  const left = new TextEncoder().encode(a);
+  const right = new TextEncoder().encode(b);
+  if (left.length !== right.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < left.length; i++) {
+    diff |= left[i] ^ right[i];
+  }
+  return diff === 0;
+}
+
+export function isSecureRequest(env: Env, url: string): boolean {
+  return new URL(url).protocol === "https:";
+}

@@ -184,6 +184,50 @@ needs the click's transient user activation, so it is called before the file con
 awaiting a DOCX or PDF build first would spend the activation and the dialog would never appear.
 Where the API is unavailable (Firefox, Safari) it falls back to a plain download.
 
+## Accounts and access codes
+
+Several people can use one deployment, each with their own ElevenLabs key and their own history.
+There is no self-registration: accounts are created on `/admin.html`, and a login with an unknown
+code is refused.
+
+**The access code is the credential.** It is a 15-character random value, and only its SHA-256 is
+stored, so a copy of this database does not yield working logins and a lost code cannot be looked
+up — only replaced. Case and spacing are forgiven so a code can be read off a page. Signing in
+sets an HttpOnly, SameSite=Lax cookie, Secure over HTTPS, which page scripts cannot read back out.
+
+### Isolation is enforced in the data layer, not at the call sites
+
+`JobRepository` takes the account id in its constructor and every job query filters on it, with
+preference keys namespaced by it too. The scope is not something a route has to remember: a scope
+that must be remembered is one that gets forgotten, and forgetting it once would quietly show
+someone else's transcripts. `services()` is the only way a request obtains a repository, and it
+throws 401 without a session, so there is no unscoped path a request can reach by accident.
+
+The queue consumer is the one deliberate exception: it has no session and works from a job id, so
+it reads the owning account off the job itself and spends **that** account's key. Verified with two
+accounts holding distinguishable keys — each job's upstream request carried its own.
+
+Fetching another account's job by id returns 404, which reads the same as not existing, and the
+diagnostics trail is restricted to the caller's own jobs because `job_events` has no account column
+of its own.
+
+### Claiming a deployment
+
+`/admin.html` sets the admin code on first use, which needs nothing configured in the dashboard.
+That first-run window is the obvious hole, so claiming requires the **last four characters of the
+ElevenLabs key the deployment already holds**: the owner knows it and nobody else does. With no key
+stored there is nothing yet to take, so nothing to prove. Claiming also turns that existing key
+into the first account and adopts the jobs already in the database, so history from before accounts
+existed is not stranded behind a login nothing owns.
+
+The admin code is sent as a header on every admin request rather than exchanged for a session, so a
+browser left open on that page is not itself an admin credential.
+
+### This replaces the Cloudflare Access plan
+
+Access restricted to one email would block every other user, so the two are alternatives rather
+than layers. The login gate is now what keeps the deployment private.
+
 ## Diagnosing a failed job
 
 Three places record what happened, because they fail in different ways.

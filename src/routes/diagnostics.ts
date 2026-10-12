@@ -20,21 +20,29 @@ interface EventRow {
  * anyone having to go and copy logs out by hand.
  */
 diagnosticRoutes.get("/api/diagnostics", async (c) => {
-  const { repository } = services(c);
+  const { repository } = await services(c);
   const jobId = c.req.query("job");
   const limit = Math.min(Number(c.req.query("limit") ?? 100) || 100, 500);
 
-  const events = jobId
-    ? await c.env.DB.prepare(
-        `SELECT * FROM job_events WHERE job_id = ? ORDER BY id ASC LIMIT ?`
-      )
-        .bind(jobId, limit)
-        .all<EventRow>()
-    : await c.env.DB.prepare(`SELECT * FROM job_events ORDER BY id DESC LIMIT ?`)
-        .bind(limit)
-        .all<EventRow>();
-
+  // Scoped through the caller's own jobs. The events table has no account of its own, so
+  // restricting it any other way would hand one person another's trail.
   const records = await repository.listJobs();
+  const ownedIds = new Set(records.map((record) => record.job_id));
+
+  if (jobId && !ownedIds.has(jobId)) {
+    return c.json({ now: new Date().toISOString(), jobs: [], events: [] });
+  }
+
+  const wanted = jobId ? [jobId] : records.slice(0, 15).map((record) => record.job_id);
+  const events = wanted.length
+    ? await c.env.DB.prepare(
+        `SELECT * FROM job_events WHERE job_id IN (${wanted.map(() => "?").join(",")})
+         ORDER BY id ${jobId ? "ASC" : "DESC"} LIMIT ?`
+      )
+        .bind(...wanted, limit)
+        .all<EventRow>()
+    : { results: [] as EventRow[] };
+
   const jobs = (jobId ? records.filter((record) => record.job_id === jobId) : records.slice(0, 15)).map(
     (record) => ({
       job_id: record.job_id,
