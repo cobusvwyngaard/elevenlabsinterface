@@ -195,6 +195,31 @@ stored, so a copy of this database does not yield working logins and a lost code
 up — only replaced. Case and spacing are forgiven so a code can be read off a page. Signing in
 sets an HttpOnly, SameSite=Lax cookie, Secure over HTTPS, which page scripts cannot read back out.
 
+### Several accounts can share one key
+
+Isolation keys off the account, not the key, so any number of accounts can hold the same
+ElevenLabs key: they draw on the same credits and still cannot see each other's work. Verified with
+three accounts pooled on one key — each job's upstream request carried that key, and none of them
+could list, fetch by id, or read the diagnostics trail of another's job.
+
+Because that is a deliberate arrangement rather than an accident, the admin page makes it visible
+and safe to run:
+
+- Each account shows a **key fingerprint** (a truncated hash of the key) with the masked last four
+  and how many other accounts are on it, so a shared key does not have to be tracked by memory.
+  The raw key is never in the listing.
+- A new account can **take an existing account's key** from a dropdown instead of having it
+  retyped. That avoids the failure that is hardest to spot: a typo creates a second, slightly
+  different key that simply does not work and looks no different in the list.
+- Replacing a key updates **every account on it at once**. Rotating one at a time leaves any that
+  were missed pointing at a dead key, which surfaces later as a transcription failing for no
+  visible reason.
+
+One consequence is worth knowing rather than discovering: usage is a property of the key, so on a
+shared key the credit figures cover everybody on it. The usage panel says so, with the number of
+accounts sharing, rather than leaving someone to puzzle over totals that do not match what they
+personally transcribed.
+
 ### Isolation is enforced in the data layer, not at the call sites
 
 `JobRepository` takes the account id in its constructor and every job query filters on it, with

@@ -45,6 +45,13 @@
     box.append(heading, code, note);
   }
 
+  /** Hides the paste field when an existing key was chosen, so only one of the two applies. */
+  function syncKeyField() {
+    const reusing = Boolean($("reuseKey").value);
+    $("newKeyField").classList.toggle("hidden", reusing);
+    $("newKey").required = !reusing;
+  }
+
   async function refresh() {
     try {
       const { accounts } = await call("/api/admin/accounts", { headers: adminHeaders() });
@@ -54,6 +61,23 @@
         list.innerHTML = '<p class="empty-note">No accounts yet.</p>';
         return;
       }
+      // The key dropdown is rebuilt from the same data, so sharing a key is a choice rather than
+      // a retyped secret.
+      const reuse = $("reuseKey");
+      const chosen = reuse.value;
+      reuse.innerHTML = '<option value="">Paste a new key below</option>';
+      const seen = new Set();
+      for (const account of accounts) {
+        if (!account.key_fingerprint || seen.has(account.key_fingerprint)) continue;
+        seen.add(account.key_fingerprint);
+        const option = document.createElement("option");
+        option.value = account.account_id;
+        option.textContent = `Share the key ending ${account.key_masked} (key ${account.key_fingerprint})`;
+        reuse.appendChild(option);
+      }
+      reuse.value = chosen;
+      syncKeyField();
+
       for (const account of accounts) {
         const row = document.createElement("div");
         row.className = "card";
@@ -61,7 +85,11 @@
         title.textContent = account.label + (account.disabled ? " (disabled)" : "");
         const meta = document.createElement("p");
         meta.className = "result-meta";
-        meta.textContent = `Created ${account.created_at}. Last signed in ${account.last_seen_at || "never"}.`;
+        const sharing = account.shared_with
+          ? ` Key ${account.key_fingerprint} (${account.key_masked}), shared with ${account.shared_with} other account${account.shared_with === 1 ? "" : "s"}.`
+          : ` Key ${account.key_fingerprint} (${account.key_masked}), not shared.`;
+        meta.textContent =
+          `Created ${account.created_at}. Last signed in ${account.last_seen_at || "never"}.` + sharing;
 
         const rotate = document.createElement("button");
         rotate.className = "download-link";
@@ -95,7 +123,28 @@
           }
         };
 
-        row.append(title, meta, rotate, toggle);
+        const replaceKey = document.createElement("button");
+        replaceKey.className = "download-link";
+        replaceKey.textContent = account.shared_with
+          ? `Replace this key for all ${account.shared_with + 1} accounts`
+          : "Replace this key";
+        replaceKey.onclick = async () => {
+          const next = prompt(`New ElevenLabs key for key ${account.key_fingerprint}:`);
+          if (!next) return;
+          try {
+            const result = await call(`/api/admin/keys/${account.key_fingerprint}`, {
+              method: "POST",
+              headers: adminHeaders(),
+              body: JSON.stringify({ api_key: next.trim() }),
+            });
+            say("adminStatus", `Key replaced on ${result.updated} account(s).`);
+            await refresh();
+          } catch (error) {
+            say("adminStatus", error.message, "error");
+          }
+        };
+
+        row.append(title, meta, rotate, toggle, replaceKey);
         list.appendChild(row);
       }
     } catch (error) {
@@ -146,7 +195,11 @@
         const result = await call("/api/admin/accounts", {
           method: "POST",
           headers: adminHeaders(),
-          body: JSON.stringify({ label: $("newLabel").value, api_key: $("newKey").value }),
+          body: JSON.stringify({
+            label: $("newLabel").value,
+            api_key: $("newKey").value,
+            reuse_key_from: $("reuseKey").value || undefined,
+          }),
         });
         showCode(result.label, result.identifier);
         $("newLabel").value = "";
@@ -159,5 +212,6 @@
     });
 
     $("adminCode")?.addEventListener("change", refresh);
+    $("reuseKey")?.addEventListener("change", syncKeyField);
   });
 })();

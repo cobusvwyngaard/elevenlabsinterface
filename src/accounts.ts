@@ -39,6 +39,24 @@ export function generateIdentifier(): string {
   return chars.join("").replace(/(.{5})(?=.)/g, "$1-");
 }
 
+/**
+ * A short, stable label for a key, so two accounts on the same key can be seen to be on it.
+ *
+ * Derived from the key rather than stored, which keeps it in step automatically. It is a truncated
+ * hash: enough to group by, not enough to work backwards from.
+ */
+export async function keyFingerprint(apiKey: string): Promise<string> {
+  const trimmed = (apiKey || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(trimmed));
+  return [...new Uint8Array(digest)]
+    .slice(0, 4)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export class AccountStore {
   constructor(private readonly db: D1Database) {}
 
@@ -74,6 +92,76 @@ export class AccountStore {
       )
       .all<Omit<Account, "api_key">>();
     return result.results ?? [];
+  }
+
+  /**
+   * The account list, with each key reduced to a fingerprint.
+   *
+   * Several accounts may deliberately hold the same key, drawing on the same credits while keeping
+   * separate transcripts. Without this the admin page could not show which ones those are, and a
+   * shared key would have to be tracked by memory.
+   */
+  async listWithKeys(): Promise<
+    (Omit<Account, "api_key"> & { key_fingerprint: string; key_masked: string | null; shared_with: number })[]
+  > {
+    const result = await this.db
+      .prepare(
+        `SELECT account_id, label, api_key, created_at, last_seen_at, disabled
+         FROM accounts ORDER BY datetime(created_at) DESC`
+      )
+      .all<Account>();
+
+    const rows = result.results ?? [];
+    const withPrints = await Promise.all(
+      rows.map(async (row) => ({
+        ...row,
+        key_fingerprint: await keyFingerprint(row.api_key),
+      }))
+    );
+
+    const counts = new Map<string, number>();
+    for (const row of withPrints) {
+      if (row.key_fingerprint) {
+        counts.set(row.key_fingerprint, (counts.get(row.key_fingerprint) ?? 0) + 1);
+      }
+    }
+
+    return withPrints.map(({ api_key, ...rest }) => ({
+      ...rest,
+      key_masked: api_key?.trim() ? `••••${api_key.trim().slice(-4)}` : null,
+      // How many accounts in total are on this key, this one included.
+      shared_with: Math.max(0, (counts.get(rest.key_fingerprint) ?? 1) - 1),
+    }));
+  }
+
+  /**
+   * Replaces a key everywhere it is in use.
+   *
+   * Rotating a shared key one account at a time leaves any that were missed pointing at a key that
+   * no longer works, which surfaces later as a transcription failing for no visible reason.
+   */
+  async replaceKeyEverywhere(fingerprint: string, newKey: string): Promise<number> {
+    const result = await this.db.prepare(`SELECT account_id, api_key FROM accounts`).all<Account>();
+    const matching: string[] = [];
+    for (const row of result.results ?? []) {
+      if ((await keyFingerprint(row.api_key)) === fingerprint) {
+        matching.push(row.account_id);
+      }
+    }
+    for (const accountId of matching) {
+      await this.setApiKey(accountId, newKey);
+    }
+    return matching.length;
+  }
+
+  /** Reads one account's key, so a new account can be put on the same one without retyping it. */
+  async keyOf(accountId: string): Promise<string | null> {
+    const row = await this.db
+      .prepare(`SELECT api_key FROM accounts WHERE account_id = ?`)
+      .bind(accountId)
+      .first<{ api_key: string }>();
+    const key = row?.api_key?.trim();
+    return key ? key : null;
   }
 
   /** Creates an account and returns the identifier, which is the only time it exists in plaintext. */

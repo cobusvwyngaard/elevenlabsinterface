@@ -67,9 +67,20 @@
             <input id="newLabel" type="text" placeholder="e.g. Research assistant" required>
           </label>
           <label class="field">
-            <span>Their ElevenLabs API key</span>
-            <input id="newKey" type="password" autocomplete="off" required>
+            <span>ElevenLabs key</span>
+            <select id="reuseKey">
+              <option value="">Paste a new key below</option>
+            </select>
           </label>
+          <label class="field" id="newKeyField">
+            <span>Their ElevenLabs API key</span>
+            <input id="newKey" type="password" autocomplete="off">
+          </label>
+          <p class="result-meta">
+            Several people can share one key: they draw on the same credits, but each sees only
+            their own transcripts. Choose an existing key above rather than retyping it — a typo
+            makes a second key that quietly does not work.
+          </p>
           <button class="primary-button" type="submit">Create account</button>
         </form>
 

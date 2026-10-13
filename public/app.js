@@ -2,6 +2,8 @@ const bootstrap = window.WORKBENCH_BOOTSTRAP;
 
 const state = {
   activeJobId: null,
+  /** How many other accounts share this account's ElevenLabs key. */
+  keySharedWith: 0,
   jobs: [],
   pollTimer: null,
   pollInFlight: false,
@@ -1681,12 +1683,24 @@ async function openJob(jobId) {
 
 async function loadSettings() {
   const settings = await fetchJson("/api/settings");
+  // Usage belongs to the key, so on a shared key the figures are everyone's together. Said once,
+  // here, rather than left to be inferred from totals that will not match what one person did.
+  state.keySharedWith = Number(settings.key_shared_with) || 0;
   if (Number.isFinite(settings.max_upload_bytes) && settings.max_upload_bytes > 0) {
     maxUploadBytes = settings.max_upload_bytes;
   }
   renderKeyState(settings);
   applyDefaults(settings.last_used_defaults);
   return settings;
+}
+
+/** Appended to whatever the usage panel says, so the shared total is never read as personal. */
+function sharedKeyNote() {
+  const others = state.keySharedWith || 0;
+  if (!others) {
+    return "";
+  }
+  return ` These totals cover everyone on this key — ${others} other account${others === 1 ? "" : "s"} share it.`;
 }
 
 async function loadUsage({ silent = false } = {}) {
@@ -1697,6 +1711,9 @@ async function loadUsage({ silent = false } = {}) {
   try {
     const payload = await fetchJson("/api/usage");
     renderUsage(payload);
+    if (state.keySharedWith) {
+      setStatus(elements.usageStatus, sharedKeyNote().trim());
+    }
     startUsageRefresh();
   } catch (error) {
     stopUsageRefresh();

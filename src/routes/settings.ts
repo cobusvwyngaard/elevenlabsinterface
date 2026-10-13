@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { AccountStore } from "../accounts";
+import { AccountStore, keyFingerprint, type Account } from "../accounts";
 import { MAX_DIRECT_UPLOAD_BYTES, MAX_LINKED_UPLOAD_BYTES } from "../constants";
 import { presignConfigured } from "../presign";
 import {
@@ -17,7 +17,7 @@ import { httpError, services, type AppContext } from "./deps";
 export const settingsRoutes = new Hono<AppContext>();
 
 settingsRoutes.get("/api/settings", async (c) => {
-  const { repository, keyStore } = await services(c);
+  const { repository, keyStore, account } = await services(c);
   const apiKey = await keyStore.getKey();
   const [defaults, presets] = await Promise.all([
     repository.getLastUsedDefaults(),
@@ -39,6 +39,10 @@ settingsRoutes.get("/api/settings", async (c) => {
     // whether this deployment can sign a download URL for ElevenLabs to fetch instead.
     max_upload_bytes: presignConfigured(c.env) ? MAX_LINKED_UPLOAD_BYTES : MAX_DIRECT_UPLOAD_BYTES,
     audio_delivery: presignConfigured(c.env) ? "linked" : "direct",
+    // Usage is a property of the key, not of the account. When a key is shared, the credit figures
+    // cover everybody on it, and saying so is cheaper than letting someone puzzle over numbers
+    // that do not match what they personally transcribed.
+    key_shared_with: await sharedKeyCount(c.env.DB, account),
   });
 });
 
@@ -101,3 +105,15 @@ settingsRoutes.delete("/api/keyterm-presets/:name", async (c) => {
   await repository.setKeytermPresets(next);
   return c.json({ presets: next });
 });
+
+
+/** How many other accounts hold the same key as this one. */
+async function sharedKeyCount(db: D1Database, account: Account): Promise<number> {
+  if (!account.api_key?.trim()) {
+    return 0;
+  }
+  const mine = await keyFingerprint(account.api_key);
+  const rows = await new AccountStore(db).listWithKeys();
+  const match = rows.find((row) => row.account_id === account.account_id);
+  return match && match.key_fingerprint === mine ? match.shared_with : 0;
+}

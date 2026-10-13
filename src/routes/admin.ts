@@ -116,31 +116,63 @@ adminRoutes.post("/api/admin/claim", async (c) => {
 
 adminRoutes.get("/api/admin/accounts", async (c) => {
   await requireAdmin(c);
-  return c.json({ accounts: await new AccountStore(c.env.DB).list() });
+  return c.json({ accounts: await new AccountStore(c.env.DB).listWithKeys() });
 });
 
 /** Creates an account. The identifier comes back once and is never retrievable again. */
 adminRoutes.post("/api/admin/accounts", async (c) => {
   await requireAdmin(c);
   const body = await c.req
-    .json<{ label?: string; api_key?: string }>()
-    .catch(() => ({}) as { label?: string; api_key?: string });
+    .json<{ label?: string; api_key?: string; reuse_key_from?: string }>()
+    .catch(() => ({}) as { label?: string; api_key?: string; reuse_key_from?: string });
   const label = (body.label ?? "").trim();
-  const apiKey = (body.api_key ?? "").trim();
   if (!label) {
     throw httpError(400, "Give the account a name, so you can tell them apart.");
   }
+
+  const accounts = new AccountStore(c.env.DB);
+
+  // Several people can share one key, drawing on the same credits while keeping their transcripts
+  // to themselves. Copying it from an existing account rather than pasting it again avoids the
+  // failure that is hardest to spot: a typo makes a second, slightly different key that simply
+  // does not work, and nothing about it looks wrong in the list.
+  let apiKey = (body.api_key ?? "").trim();
+  if (body.reuse_key_from) {
+    const shared = await accounts.keyOf(body.reuse_key_from);
+    if (!shared) {
+      throw httpError(400, "That account has no key to share.");
+    }
+    apiKey = shared;
+  }
   if (!apiKey) {
-    throw httpError(400, "Paste the ElevenLabs API key for this person.");
+    throw httpError(400, "Paste an ElevenLabs API key, or choose an account to share one with.");
   }
 
-  const created = await new AccountStore(c.env.DB).create(label, apiKey);
+  const created = await accounts.create(label, apiKey);
   return c.json({
     account_id: created.accountId,
     label,
     identifier: created.identifier,
     note: "Copy this access code now. It is stored only as a hash and cannot be shown again.",
   });
+});
+
+/** Replaces a key for every account currently on it, so a shared key rotates in one go. */
+adminRoutes.post("/api/admin/keys/:fingerprint", async (c) => {
+  await requireAdmin(c);
+  const body = await c.req.json<{ api_key?: string }>().catch(() => ({}) as { api_key?: string });
+  const apiKey = (body.api_key ?? "").trim();
+  if (!apiKey) {
+    throw httpError(400, "Paste the replacement ElevenLabs API key.");
+  }
+  const updated = await new AccountStore(c.env.DB).replaceKeyEverywhere(
+    c.req.param("fingerprint"),
+    apiKey
+  );
+  if (!updated) {
+    throw httpError(404, "No accounts are using that key.");
+  }
+  return c.json({ updated });
 });
 
 adminRoutes.post("/api/admin/accounts/:id/rotate", async (c) => {
