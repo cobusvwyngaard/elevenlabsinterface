@@ -163,6 +163,40 @@ A job ElevenLabs has accepted is given 45 minutes before the stale sweep gives u
 than the 20 a job that never got that far gets. Judged by the same clock, the sweep would declare
 a transcription still in progress dead and stop collecting it.
 
+## File groups and the ZIP export
+
+Selecting several files at once already created one job per file under a shared batch id. Those
+jobs now also appear as a **group** above the job list, which opens a panel showing every file in
+the set, how many are finished, and a single **Download all as ZIP** in any export format.
+
+Only finished transcripts go into the archive, and the button says how many that is rather than
+silently leaving some out. Two uploads may legitimately share a name, so a repeat gets its position
+in the batch appended — a ZIP with two identical entries is unpleasant to extract.
+
+### The archive is built without a library
+
+`public/zip.js` writes the ZIP itself, because the browser already has the hard part:
+`CompressionStream("deflate-raw")` produces exactly the raw deflate stream that ZIP's method 8
+expects, leaving only the framing. An entry is stored uncompressed when deflating it came out
+larger. Path separators are stripped from names: a ZIP that writes outside the folder it is
+extracted into is a real hazard, and nothing here needs directories.
+
+Verified against two independent implementations rather than trusted. `unzip -t` reports no errors,
+and Python's `zipfile` reads every entry back byte-exact, including a 22 KB text file that
+compresses to 0.6% of its size, a binary blob, an empty file, and a UTF-8 name. A DOCX inside the
+archive is itself still a valid OOXML package, which is a nesting case worth checking.
+
+As with the single-file exports, the save dialog opens **before** anything is built: fetching and
+rendering several transcripts takes far longer than the click's user activation lasts.
+
+### A polling bug this surfaced
+
+The job list was refreshed by a poll that walked from one job to the next and stopped as soon as
+that walk could not continue. With three files, the page sat at "2/3 ready" indefinitely while all
+three were finished in the database. A separate timer now refreshes the list while any job is
+unfinished and stops itself when none is, which answers to the list rather than to one job — and
+opening a group no longer lets a refresh replace it with a single transcript.
+
 ## Choosing files, and naming what comes out
 
 Files can be dropped onto the upload area as well as chosen from it. A drop assigns the files to

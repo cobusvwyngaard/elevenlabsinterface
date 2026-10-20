@@ -943,3 +943,52 @@ textarea {
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* Upload groups: several files submitted together, listed so the set can be seen as one thing. */
+.group-section {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.group-heading {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.group-download-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin: 12px 0 4px;
+}
+
+.group-download-row .field {
+  flex: 1 1 220px;
+}
+
+.group-members {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.group-members li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 251, 245, 0.5);
+}
+
+.group-member-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}

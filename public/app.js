@@ -4,6 +4,11 @@ const state = {
   activeJobId: null,
   /** How many other accounts share this account's ElevenLabs key. */
   keySharedWith: 0,
+  /** The upload group currently being viewed, if any. */
+  activeBatchId: null,
+  /** Refreshes the job list while any job is unfinished, independent of the single-job poll. */
+  listTimer: null,
+  listInFlight: false,
   jobs: [],
   pollTimer: null,
   pollInFlight: false,
@@ -61,6 +66,16 @@ const elements = {
   appShell: document.getElementById("appShell"),
   accountLabel: document.getElementById("accountLabel"),
   signOutButton: document.getElementById("signOutButton"),
+  groupSection: document.getElementById("groupSection"),
+  groupList: document.getElementById("groupList"),
+  groupPanel: document.getElementById("groupPanel"),
+  groupTitle: document.getElementById("groupTitle"),
+  groupSummary: document.getElementById("groupSummary"),
+  groupMembers: document.getElementById("groupMembers"),
+  groupFormat: document.getElementById("groupFormat"),
+  groupZipButton: document.getElementById("groupZipButton"),
+  groupStatus: document.getElementById("groupStatus"),
+  closeGroupButton: document.getElementById("closeGroupButton"),
   cancelJobButton: document.getElementById("cancelJobButton"),
   historyList: document.getElementById("historyList"),
   refreshHistoryButton: document.getElementById("refreshHistoryButton"),
@@ -1457,7 +1472,233 @@ function currentSpeakerNameMap() {
   return mapping;
 }
 
+/**
+ * The upload groups present in the job list.
+ *
+ * A group is the set of jobs that were submitted together, which the server already records as a
+ * batch id on each one. Derived rather than stored separately, so it cannot drift out of step with
+ * the jobs it describes.
+ */
+function uploadGroups() {
+  const groups = new Map();
+  for (const job of state.jobs) {
+    const id = job.batch_id;
+    if (!id || !(job.batch_count > 1)) {
+      continue;
+    }
+    if (!groups.has(id)) {
+      groups.set(id, { batch_id: id, expected: job.batch_count, jobs: [] });
+    }
+    groups.get(id).jobs.push(job);
+  }
+
+  for (const group of groups.values()) {
+    group.jobs.sort((a, b) => (a.batch_index ?? 0) - (b.batch_index ?? 0));
+    group.created_at = group.jobs[0]?.created_at ?? null;
+    group.done = group.jobs.filter((job) => job.status === "success").length;
+    group.failed = group.jobs.filter((job) => job.status === "error").length;
+    group.pending = group.jobs.length - group.done - group.failed;
+  }
+
+  return [...groups.values()].sort(
+    (a, b) => Date.parse(b.created_at ?? 0) - Date.parse(a.created_at ?? 0)
+  );
+}
+
+function groupLabel(group) {
+  const first = group.jobs[0]?.source_label ?? "files";
+  const extra = group.expected - 1;
+  return extra > 0 ? `${first} +${extra} more` : first;
+}
+
+function renderGroups() {
+  if (!elements.groupList) {
+    return;
+  }
+  const groups = uploadGroups();
+  elements.groupSection.classList.toggle("hidden", groups.length === 0);
+  elements.groupList.innerHTML = "";
+
+  for (const group of groups) {
+    const item = document.createElement("li");
+    const ready = `${group.done}/${group.expected} ready`;
+    item.innerHTML = `
+      <button class="history-item ${group.batch_id === state.activeBatchId ? "active" : ""}" type="button" data-batch-id="${escapeHtml(group.batch_id)}">
+        <strong>${escapeHtml(groupLabel(group))}</strong>
+        <div>${escapeHtml(formatDateTime(group.created_at))}</div>
+        <div class="history-meta">
+          <span class="pill">${escapeHtml(String(group.expected))} files</span>
+          <span class="pill ${group.done === group.expected ? "success" : ""}">${escapeHtml(ready)}</span>
+          ${group.failed ? `<span class="pill error">${group.failed} failed</span>` : ""}
+        </div>
+      </button>`;
+    elements.groupList.appendChild(item);
+  }
+}
+
+/** Opens a group, which takes the place of the single-transcript view. */
+function openGroup(batchId) {
+  state.activeBatchId = batchId;
+  state.activeJobId = null;
+  stopPolling();
+  // renderHistory redraws the group list and the panel, so one call covers all three.
+  renderHistory();
+}
+
+function closeGroup() {
+  state.activeBatchId = null;
+  elements.groupPanel?.classList.add("hidden");
+  renderHistory();
+}
+
+/**
+ * Draws the group panel, and nothing else.
+ *
+ * Deliberately free of side effects beyond its own markup: renderHistory calls this, so anything
+ * here that re-rendered the history would call straight back into itself.
+ */
+function renderGroupPanel() {
+  if (!state.activeBatchId) {
+    elements.groupPanel?.classList.add("hidden");
+    return;
+  }
+  const group = uploadGroups().find((candidate) => candidate.batch_id === state.activeBatchId);
+  if (!group) {
+    state.activeBatchId = null;
+    elements.groupPanel?.classList.add("hidden");
+    return;
+  }
+
+  elements.resultsPanel.classList.add("hidden");
+  elements.resultsEmptyState.classList.add("hidden");
+  elements.groupPanel.classList.remove("hidden");
+
+  elements.groupTitle.textContent = `${group.expected} files uploaded together`;
+  const parts = [`${group.done} ready`];
+  if (group.pending) parts.push(`${group.pending} still working`);
+  if (group.failed) parts.push(`${group.failed} failed`);
+  elements.groupSummary.textContent = `${formatDateTime(group.created_at)} — ${parts.join(", ")}.`;
+
+  // Only the finished ones can go into an archive, so the button says what it will actually include.
+  elements.groupZipButton.disabled = group.done === 0;
+  elements.groupZipButton.textContent = group.done
+    ? `Download ${group.done} transcript${group.done === 1 ? "" : "s"} as ZIP`
+    : "No transcripts ready yet";
+
+  if (elements.groupFormat && !elements.groupFormat.options.length) {
+    for (const definition of window.Exporters.FORMATS) {
+      const option = document.createElement("option");
+      option.value = definition.format;
+      option.textContent = definition.label;
+      elements.groupFormat.appendChild(option);
+    }
+    const json = document.createElement("option");
+    json.value = "json";
+    json.textContent = "Raw JSON";
+    elements.groupFormat.appendChild(json);
+    elements.groupFormat.value = "txt";
+  }
+
+  elements.groupMembers.innerHTML = "";
+  for (const job of group.jobs) {
+    const row = document.createElement("li");
+    const name = document.createElement("span");
+    name.className = "group-member-name";
+    name.textContent = `${job.batch_index}. ${job.source_label}`;
+
+    const right = document.createElement("span");
+    right.className = "history-meta";
+    const status = document.createElement("span");
+    status.className = `pill ${toneForStatus(job.status)}`;
+    status.textContent = job.status;
+    const open = document.createElement("button");
+    open.className = "download-link";
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", async () => {
+      state.activeBatchId = null;
+      elements.groupPanel.classList.add("hidden");
+      elements.resultsEmptyState.classList.add("hidden");
+      renderGroups();
+      await openJob(job.job_id);
+    });
+    right.append(status, open);
+    row.append(name, right);
+    elements.groupMembers.appendChild(row);
+  }
+}
+
+/**
+ * Packs every finished transcript in a group into one archive.
+ *
+ * The save location is chosen before any of it is built: fetching and rendering several
+ * transcripts takes far longer than the click's user activation lasts, and asking afterwards
+ * would mean the dialog never opens.
+ */
+async function downloadGroupZip() {
+  const group = uploadGroups().find((candidate) => candidate.batch_id === state.activeBatchId);
+  if (!group) {
+    return;
+  }
+  const format = elements.groupFormat.value || "txt";
+  const ready = group.jobs.filter((job) => job.status === "success" && job.transcript_url);
+  if (!ready.length) {
+    setStatus(elements.groupStatus, "None of these have a transcript yet.", "error");
+    return;
+  }
+
+  const stamp = (group.created_at || "").slice(0, 10);
+  const zipName = `transcripts-${stamp || "group"}-${format}.zip`;
+  elements.groupZipButton.disabled = true;
+
+  try {
+    const saved = await window.Exporters.saveWithPicker(zipName, "zip", async () => {
+      const files = [];
+      const used = new Map();
+
+      for (const [index, job] of ready.entries()) {
+        setStatus(elements.groupStatus, `Building ${index + 1} of ${ready.length}...`);
+        const response = await loadTranscriptResponse(job);
+
+        // Two uploads can legitimately share a name, and a ZIP with two identical entries is a
+        // mess to extract, so a repeat gets its batch position appended.
+        const stem = fileNameStem(job.source_label) || `transcript-${job.batch_index}`;
+        const count = (used.get(stem) ?? 0) + 1;
+        used.set(stem, count);
+        const unique = count > 1 ? `${stem} (${job.batch_index})` : stem;
+
+        const data =
+          format === "json"
+            ? JSON.stringify(response, null, 2)
+            : await window.Exporters.buildFile(
+                format,
+                response,
+                job.speaker_name_map && Object.keys(job.speaker_name_map).length ? job.speaker_name_map : null,
+                job.export_metadata || {}
+              );
+        files.push({ name: `${unique}.${format}`, data });
+      }
+
+      setStatus(elements.groupStatus, "Compressing...");
+      return window.Zip.build(files);
+    });
+
+    setStatus(
+      elements.groupStatus,
+      saved ? `Saved ${ready.length} transcript${ready.length === 1 ? "" : "s"}.` : "Save cancelled."
+    );
+  } catch (error) {
+    setStatus(elements.groupStatus, error.message || "Could not build the archive.", "error");
+  } finally {
+    elements.groupZipButton.disabled = false;
+  }
+}
+
 function renderHistory() {
+  renderGroups();
+  if (state.activeBatchId) {
+    renderGroupPanel();
+  }
   elements.historyList.innerHTML = "";
   if (state.jobs.length === 0) {
     elements.historyList.innerHTML = state.hiddenJobCount > 0 && !state.showHidden
@@ -1491,8 +1732,16 @@ function renderHistory() {
   elements.historyList.querySelectorAll("[data-job-id]").forEach((button) => {
     button.addEventListener("click", async () => {
       const jobId = button.getAttribute("data-job-id");
+      // Opening a single job leaves the group view, so the two cannot both claim the panel.
+      state.activeBatchId = null;
+      elements.groupPanel?.classList.add("hidden");
+      renderGroups();
       await openJob(jobId);
     });
+  });
+
+  elements.groupList?.querySelectorAll("[data-batch-id]").forEach((button) => {
+    button.addEventListener("click", () => openGroup(button.getAttribute("data-batch-id")));
   });
 }
 
@@ -1735,11 +1984,52 @@ async function loadJobs(preferredJobId = state.activeJobId) {
     state.activeJobId = null;
   }
   renderHistory();
+  // A group is open on purpose, so nothing here may replace it with a single job.
+  if (state.activeBatchId) {
+    ensureListPolling();
+    return;
+  }
   if (state.jobs.length > 0 && !state.activeJobId) {
     await openJob(state.jobs[0].job_id);
   } else if (state.jobs.length === 0) {
     clearResults();
   }
+  ensureListPolling();
+}
+
+/**
+ * Keeps the job list refreshing while anything is unfinished.
+ *
+ * Separate from the single-job poll, which walks from one job to the next and stops as soon as
+ * that walk cannot continue — viewing a group, for instance, leaves no active job to walk from.
+ * A batch of three would then sit at "2/3 ready" for good, which is what it did: all three were
+ * finished in the database while the page still showed two. This timer answers to the list rather
+ * than to one job, and stops itself once every job is terminal.
+ */
+function ensureListPolling() {
+  const unfinished = state.jobs.some((job) => !job.is_terminal);
+  if (!unfinished) {
+    if (state.listTimer) {
+      clearInterval(state.listTimer);
+      state.listTimer = null;
+    }
+    return;
+  }
+  if (state.listTimer) {
+    return;
+  }
+  state.listTimer = window.setInterval(() => {
+    if (state.listInFlight) {
+      return;
+    }
+    state.listInFlight = true;
+    // Passes the active job through, so a refresh never changes which job is open.
+    loadJobs(state.activeJobId)
+      .catch(() => undefined)
+      .finally(() => {
+        state.listInFlight = false;
+      });
+  }, 3000);
 }
 
 async function deleteJobData(deleteLocal, deleteRemote) {
@@ -2230,6 +2520,15 @@ window.addEventListener("DOMContentLoaded", async () => {
   elements.compressionBitrate?.addEventListener("change", refreshCompressionHint);
   refreshCompressionHint();
   setupLogin();
+  elements.groupZipButton?.addEventListener("click", downloadGroupZip);
+  elements.closeGroupButton?.addEventListener("click", () => {
+    closeGroup();
+    setResultsPlaceholder(
+      "No transcript loaded",
+      "Pick a job from the list, or open a file group to download a whole set at once."
+    );
+    elements.resultsEmptyState.classList.remove("hidden");
+  });
   await resolveSession();
 });
 

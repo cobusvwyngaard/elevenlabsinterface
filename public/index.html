@@ -68,6 +68,10 @@
               <button id="refreshHistoryButton" class="ghost-button" type="button">Refresh</button>
             </div>
           </div>
+          <div id="groupSection" class="group-section hidden">
+            <h3 class="group-heading">File groups</h3>
+            <ul id="groupList" class="history-list"></ul>
+          </div>
           <ul id="historyList" class="history-list">
             <li class="empty-note">No jobs yet.</li>
           </ul>
@@ -381,6 +385,30 @@
               <p id="resultsEmptyBody">Run a transcription or reopen one from history to see the transcript, exports, and timecoded entries.</p>
             </div>
 
+            <!-- Shown instead of a single transcript when a whole upload group is opened. -->
+            <section id="groupPanel" class="card hidden">
+              <div class="panel-header">
+                <div>
+                  <h2 id="groupTitle">File group</h2>
+                  <p class="result-meta" id="groupSummary"></p>
+                </div>
+                <button id="closeGroupButton" class="ghost-button" type="button">Close group</button>
+              </div>
+
+              <div class="group-download-row">
+                <label class="field">
+                  <span>Download every transcript as</span>
+                  <select id="groupFormat"></select>
+                </label>
+                <button id="groupZipButton" class="primary-button" type="button">
+                  Download all as ZIP
+                </button>
+              </div>
+              <p id="groupStatus" class="status-message"></p>
+
+              <ul id="groupMembers" class="group-members"></ul>
+            </section>
+
             <div id="resultsPanel" class="hidden">
               <label class="field export-name-field">
                 <span>Saved file name</span>
@@ -537,6 +565,7 @@
         }
       };
     </script>
+    <script src="/zip.js" defer></script>
     <script src="/ogg-opus.js" defer></script>
     <script src="/audio-compress.js" defer></script>
     <script src="/transcript-utils.js" defer></script>

@@ -15,9 +15,11 @@
     html: "text/html;charset=utf-8",
     docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     pdf: "application/pdf",
+    zip: "application/zip",
   };
 
   const FORMAT_DESCRIPTIONS = {
+    zip: "ZIP archive",
     json: "Raw transcript JSON",
     txt: "Plain text",
     srt: "SubRip subtitles",
@@ -339,5 +341,33 @@ ${body}
     saveBlob(blob, filename);
   }
 
-  global.Exporters = { FORMATS, download, downloadRaw };
+  /**
+   * Builds one transcript file without saving it, for callers that are assembling an archive.
+   */
+  async function buildFile(format, response, speakerNames, metadata) {
+    return buildBlob(format, response, speakerNames, metadata);
+  }
+
+  /**
+   * Saves a blob the caller builds, with the folder chosen first.
+   *
+   * The picker has to be opened before anything is built, because it needs the click's transient
+   * user activation and assembling an archive of several transcripts takes far too long to still
+   * have it afterwards. So the location is chosen, and only then is `build` awaited.
+   */
+  async function saveWithPicker(filename, format, build) {
+    const target = await pickSaveLocation(filename, format);
+    if (target === SAVE_CANCELLED) {
+      return false;
+    }
+    const blob = await build();
+    if (target) {
+      await writeTo(target, blob);
+      return true;
+    }
+    saveBlob(blob, filename);
+    return true;
+  }
+
+  global.Exporters = { FORMATS, download, downloadRaw, buildFile, saveWithPicker };
 })(window);

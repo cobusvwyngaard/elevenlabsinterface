@@ -34,6 +34,12 @@ function promoted(record: JobRecord): Record<string, unknown> {
   return result;
 }
 
+/** The stored transcript's location, or null while there is nothing to fetch. */
+function transcriptUrl(record: JobRecord): string | null {
+  const available = record.status === "success" && Boolean(record.response_json_path);
+  return available ? `/downloads/${record.job_id}/json` : null;
+}
+
 export function serializeSummary(record: JobRecord): Record<string, unknown> {
   return {
     job_id: record.job_id,
@@ -54,6 +60,10 @@ export function serializeSummary(record: JobRecord): Record<string, unknown> {
     is_hidden: isHidden(record),
     stages: record.effective_settings?.stages ?? [],
     upload_bytes: record.effective_settings?.upload_bytes ?? null,
+    // Included in the summary so a group of jobs can be archived without fetching each one's
+    // detail first. It is derived from the id and the status, costs nothing to produce, and the
+    // route behind it is account-scoped, so it grants no access the list did not already imply.
+    transcript_url: transcriptUrl(record),
     ...promoted(record),
   };
 }
@@ -68,7 +78,7 @@ export function serializeDetail(
   speakerNames: Record<string, string>,
   exportMetadata: Record<string, unknown>
 ): Record<string, unknown> {
-  const available = record.status === "success" && Boolean(record.response_json_path);
+  const available = Boolean(transcriptUrl(record));
 
   return {
     ...serializeSummary(record),
@@ -76,7 +86,6 @@ export function serializeDetail(
     effective_settings: record.effective_settings,
     speaker_name_map: speakerNames,
     export_metadata: exportMetadata,
-    transcript_url: available ? `/downloads/${record.job_id}/json` : null,
     outputs: available
       ? [{ format: "json", label: "Raw JSON", download_url: `/downloads/${record.job_id}/json` }]
       : [],
